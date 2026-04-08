@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Thinking SVG Gap Fix Test</title>
+  <style>
+    body {
+      display: flex;
+      gap: 40px;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      background: #dff0ff;
+      font-family: sans-serif;
+    }
+    .test-item {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 10px;
+    }
+    .svg-container {
+      background: white;
+      padding: 20px;
+      border-radius: 8px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    }
+  </style>
+</head>
+<body>
+  <div class="test-item">
+    <div class="svg-container">
+      <svg width="200" height="200" viewBox="-15 -25 45 45" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <linearGradient id="borderGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" stop-color="#4fc3f7"/>
+            <stop offset="50%" stop-color="#2979ff"/>
+            <stop offset="100%" stop-color="#69f0ae"/>
+          </linearGradient>
+          <filter id="glow">
+            <feGaussianBlur stdDeviation="0.3" result="blur"/>
+            <feMerge>
+              <feMergeNode in="blur"/>
+              <feMergeNode in="SourceGraphic"/>
+            </feMerge>
+          </filter>
+          <style>
+            @keyframes eye-shift {
+              0%   { transform: translateX(-0.9px); }
+              30%  { transform: translateX(-0.9px); }
+              50%  { transform: translateX(0.9px); }
+              80%  { transform: translateX(0.9px); }
+              100% { transform: translateX(-0.9px); }
+            }
+            @keyframes ring-pulse {
+              0%, 100% { r: 4.35; opacity: 0.6; stroke-width: 0.6; }
+              50%       { r: 5.1;  opacity: 1;   stroke-width: 0.6; }
+            }
+            @keyframes ring-pulse-bg {
+              0%, 100% { r: 4.35; opacity: 0.2; stroke-width: 1.2; }
+              50%       { r: 5.4;  opacity: 0.5; stroke-width: 1.2; }
+            }
+            .thinking-eye  { animation: eye-shift 2.0s ease-in-out infinite; }
+            .glow-ring     { animation: ring-pulse 2.0s ease-in-out infinite; filter: url(#glow); }
+            .glow-ring-bg  { animation: ring-pulse-bg 2.0s ease-in-out infinite; }
+          </style>
+        </defs>
+        
+        <!-- Face fill -->
+        <circle cx="7.5" cy="8" r="3.9" fill="#e8f4ff"/>
+        <!-- Border (static) -->
+        <circle cx="7.5" cy="8" r="4.05" fill="none" stroke="url(#borderGrad)" stroke-width="0.6"/>
+        <!-- Glow rings (animated) - now starting at 4.35 to match border outer edge -->
+        <circle class="glow-ring-bg" cx="7.5" cy="8" r="4.35" fill="none" stroke="url(#borderGrad)" stroke-width="1.2" opacity="0.2"/>
+        <circle class="glow-ring" cx="7.5" cy="8" r="4.35" fill="none" stroke="url(#borderGrad)" stroke-width="0.6"/>
+        
+        <!-- Eyes -->
+        <g class="thinking-eye">
+          <ellipse cx="6.9" cy="7.7" rx="0.54" ry="0.84" fill="#2979ff"/>
+          <ellipse cx="8.1" cy="7.7" rx="0.54" ry="0.84" fill="#2979ff"/>
+        </g>
+      </svg>
+    </div>
+    <div style="text-align: center;">
+      <strong>Fixed Version</strong><br>
+      <small>Glow rings start at r=4.35<br>(border outer edge)</small>
+    </div>
+  </div>
+</body>
+</html>
