@@ -8,6 +8,9 @@ const area = document.getElementById("hit-area");
 let tc = window.hitThemeConfig || {};
 let _reactions = (tc && tc.reactions) || {};
 
+// ── Platform (injected via preload-hit.js additionalArguments) ──
+const isMac = !!(window.hitPlatform && window.hitPlatform.isMac);
+
 // Theme switch: IPC push overrides additionalArguments
 if (window.hitAPI && window.hitAPI.onThemeConfig) {
   window.hitAPI.onThemeConfig((cfg) => {
@@ -35,10 +38,10 @@ window.hitAPI.onStateSync((data) => {
 // --- Drag state ---
 let isDragging = false;
 let didDrag = false;
-let lastScreenX, lastScreenY;
 let mouseDownX, mouseDownY;
-let pendingDx = 0, pendingDy = 0;
-let dragRAF = null;
+let lastDragClientX;
+let dragReactionDirection = null;
+let dragMoveRAF = null;
 const DRAG_THRESHOLD = 3;
 
 // --- Reaction state (tracked here to gate input) ---
@@ -50,7 +53,23 @@ window.hitAPI.onCancelReaction(() => {
   if (clickTimer) { clearTimeout(clickTimer); clickTimer = null; clickCount = 0; firstClickDir = null; }
   isReacting = false;
   isDragReacting = false;
+  dragReactionDirection = null;
 });
+
+function queueDragMove() {
+  if (dragMoveRAF !== null) return;
+  dragMoveRAF = requestAnimationFrame(() => {
+    dragMoveRAF = null;
+    if (!isDragging) return;
+    window.hitAPI.dragMove();
+  });
+}
+
+function clearQueuedDragMove() {
+  if (dragMoveRAF === null) return;
+  cancelAnimationFrame(dragMoveRAF);
+  dragMoveRAF = null;
+}
 
 // --- Pointer handlers ---
 area.addEventListener("pointerdown", (e) => {
@@ -59,12 +78,10 @@ area.addEventListener("pointerdown", (e) => {
     area.setPointerCapture(e.pointerId);
     isDragging = true;
     didDrag = false;
-    lastScreenX = e.screenX;
-    lastScreenY = e.screenY;
     mouseDownX = e.clientX;
     mouseDownY = e.clientY;
-    pendingDx = 0;
-    pendingDy = 0;
+    lastDragClientX = e.clientX;
+    dragReactionDirection = null;
     window.hitAPI.dragLock(true);
     area.classList.add("dragging");
   }
@@ -72,41 +89,28 @@ area.addEventListener("pointerdown", (e) => {
 
 document.addEventListener("pointermove", (e) => {
   if (isDragging) {
-    pendingDx += e.screenX - lastScreenX;
-    pendingDy += e.screenY - lastScreenY;
-    lastScreenX = e.screenX;
-    lastScreenY = e.screenY;
-
     if (!didDrag) {
       const totalDx = e.clientX - mouseDownX;
       const totalDy = e.clientY - mouseDownY;
       if (Math.abs(totalDx) > DRAG_THRESHOLD || Math.abs(totalDy) > DRAG_THRESHOLD) {
         didDrag = true;
-        startDragReaction();
+        startDragReaction(totalDx < 0 ? "left" : (totalDx > 0 ? "right" : null));
       }
+    } else {
+      const stepDx = e.clientX - lastDragClientX;
+      if (stepDx !== 0) startDragReaction(stepDx < 0 ? "left" : "right");
     }
-
-    if (!dragRAF) {
-      dragRAF = setTimeout(() => {
-        window.hitAPI.moveWindowBy(pendingDx, pendingDy);
-        pendingDx = 0;
-        pendingDy = 0;
-        dragRAF = null;
-      }, 0);
-    }
+    lastDragClientX = e.clientX;
+    queueDragMove();
   }
 });
 
 function stopDrag() {
   if (!isDragging) return;
+  clearQueuedDragMove();
   isDragging = false;
   window.hitAPI.dragLock(false);
   area.classList.remove("dragging");
-  if (pendingDx !== 0 || pendingDy !== 0) {
-    if (dragRAF) { clearTimeout(dragRAF); dragRAF = null; }
-    window.hitAPI.moveWindowBy(pendingDx, pendingDy);
-    pendingDx = 0; pendingDy = 0;
-  }
   if (didDrag) {
     window.hitAPI.dragEnd();
   }
@@ -114,17 +118,29 @@ function stopDrag() {
 }
 
 document.addEventListener("pointerup", (e) => {
-  if (e.button === 0) {
-    const wasDrag = didDrag;
-    stopDrag();
-    if (!wasDrag) {
-      if (e.ctrlKey || e.metaKey) {
-        window.hitAPI.showSessionMenu();
-      } else {
-        handleClick(e.clientX);
-      }
-    }
+  if (e.button !== 0) return;
+  const wasDrag = didDrag;
+  stopDrag();
+  if (wasDrag) return;
+
+  // macOS Ctrl-click is the system right-click gesture. Let the OS / our
+  // contextmenu handler deal with it; do NOT treat it as the Dashboard
+  // shortcut, and do NOT fall through to handleClick (would otherwise
+  // leak into the click accumulator).
+  if (isMac && e.ctrlKey && !e.metaKey) {
+    resetClickAccumulator();
+    return;
   }
+
+  // Dashboard shortcut: Cmd-click on mac, Ctrl-click elsewhere.
+  const isDashboardShortcut = isMac ? e.metaKey : (e.ctrlKey && !e.metaKey);
+  if (isDashboardShortcut) {
+    resetClickAccumulator();
+    window.hitAPI.showDashboard();
+    return;
+  }
+
+  handleClick(e.clientX);
 });
 
 area.addEventListener("pointercancel", () => stopDrag());
@@ -142,23 +158,31 @@ function _getReaction(name) {
   return _reactions[name] || null;
 }
 
+function resetClickAccumulator() {
+  if (clickTimer) { clearTimeout(clickTimer); clickTimer = null; }
+  clickCount = 0;
+  firstClickDir = null;
+}
+
+// Fresh-read at reaction timer fire time, NOT closured at click time —
+// state / DND may change inside the 400 ms accumulator window.
+function canPlayReactionNow() {
+  return currentState === "idle" && !dndEnabled && !isReacting;
+}
+
 function handleClick(clientX) {
   if (miniMode) {
     window.hitAPI.exitMiniMode();
     return;
   }
-  if (isReacting || isDragReacting) return;
-
-  // Non-idle: focus terminal, no reaction
-  if (currentState !== "idle") {
-    window.hitAPI.focusTerminal();
-    return;
-  }
+  if (isDragReacting) return;
 
   clickCount++;
   if (clickCount === 1) {
     firstClickDir = clientX < area.offsetWidth / 2 ? "left" : "right";
-    window.hitAPI.focusTerminal();
+    // First click reveals the session HUD. Lightweight side effect — NOT
+    // gated by isReacting (HUD reveal is independent of pet animation).
+    window.hitAPI.revealSessionHud();
   }
 
   if (clickTimer) { clearTimeout(clickTimer); clickTimer = null; }
@@ -171,6 +195,7 @@ function handleClick(clientX) {
   if (clickCount >= 4 && doubleReact) {
     clickCount = 0;
     firstClickDir = null;
+    if (!canPlayReactionNow()) return;
     const files = doubleReact.files || [doubleReact.file];
     const file = files[Math.floor(Math.random() * files.length)];
     playReaction(file, doubleReact.duration || 3500);
@@ -178,15 +203,14 @@ function handleClick(clientX) {
     clickTimer = setTimeout(() => {
       clickTimer = null;
       clickCount = 0;
+      const dir = firstClickDir;
+      firstClickDir = null;
+      if (!canPlayReactionNow()) return;
       if (annoyedReact && Math.random() < 0.5) {
-        firstClickDir = null;
         playReaction(annoyedReact.file, annoyedReact.duration || 3500);
       } else if (leftReact && rightReact) {
-        const react = firstClickDir === "left" ? leftReact : rightReact;
-        firstClickDir = null;
+        const react = dir === "left" ? leftReact : rightReact;
         playReaction(react.file, react.duration || 2500);
-      } else {
-        firstClickDir = null;
       }
     }, CLICK_WINDOW_MS);
   } else {
@@ -207,21 +231,23 @@ function playReaction(svg, duration) {
 }
 
 // --- Drag reaction ---
-function startDragReaction() {
-  if (isDragReacting) return;
+function startDragReaction(direction) {
   if (dndEnabled) return;
+  if (isDragReacting && dragReactionDirection === direction) return;
 
   if (isReacting) {
     isReacting = false;
   }
 
   isDragReacting = true;
-  window.hitAPI.startDragReaction();
+  dragReactionDirection = direction;
+  window.hitAPI.startDragReaction(direction);
 }
 
 function endDragReaction() {
   if (!isDragReacting) return;
   isDragReacting = false;
+  dragReactionDirection = null;
   window.hitAPI.endDragReaction();
 }
 

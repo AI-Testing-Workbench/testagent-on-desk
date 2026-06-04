@@ -3,7 +3,14 @@
 const { describe, it } = require("node:test");
 const assert = require("node:assert");
 
-const { isAgentEnabled, isAgentPermissionsEnabled } = require("../src/agent-gate");
+const {
+  getCodexPermissionMode,
+  isAgentEnabled,
+  isAgentPermissionsEnabled,
+  isAgentNotificationHookEnabled,
+  isCodexNativeNotificationSoundEnabled,
+  isCodexPermissionInterceptEnabled,
+} = require("../src/agent-gate");
 const { commandRegistry } = require("../src/settings-actions");
 const prefs = require("../src/prefs");
 
@@ -123,6 +130,94 @@ describe("isAgentPermissionsEnabled", () => {
   });
 });
 
+describe("isAgentNotificationHookEnabled", () => {
+  it("returns true for missing snapshot / agentId / agents field", () => {
+    assert.strictEqual(isAgentNotificationHookEnabled(null, "claude-code"), true);
+    assert.strictEqual(isAgentNotificationHookEnabled({}, "claude-code"), true);
+    assert.strictEqual(isAgentNotificationHookEnabled(prefs.getDefaults(), null), true);
+    assert.strictEqual(isAgentNotificationHookEnabled({ lang: "en" }, "claude-code"), true);
+  });
+
+  it("returns true when the flag is absent (pre-flag prefs file)", () => {
+    // Upgrade path: existing users have {enabled, permissionsEnabled} only —
+    // they must keep hearing idle alerts unless they explicitly turn them off.
+    assert.strictEqual(
+      isAgentNotificationHookEnabled(
+        { agents: { "claude-code": { enabled: true, permissionsEnabled: true } } },
+        "claude-code"
+      ),
+      true
+    );
+  });
+
+  it("returns false only when notificationHookEnabled === false", () => {
+    assert.strictEqual(
+      isAgentNotificationHookEnabled(
+        { agents: { "claude-code": { notificationHookEnabled: false } } },
+        "claude-code"
+      ),
+      false
+    );
+  });
+
+  it("is independent of master enabled / permissionsEnabled flags", () => {
+    // The Agents tab reads each sub-switch's committed state regardless of
+    // master or sibling sub state, so these gates must not short-circuit
+    // into each other.
+    const snap = {
+      agents: {
+        "claude-code": {
+          enabled: false,
+          permissionsEnabled: false,
+          notificationHookEnabled: true,
+        },
+      },
+    };
+    assert.strictEqual(isAgentNotificationHookEnabled(snap, "claude-code"), true);
+  });
+});
+
+describe("Codex permission mode gate", () => {
+  it("defaults missing Codex permissionMode to intercept", () => {
+    assert.strictEqual(getCodexPermissionMode(null), "intercept");
+    assert.strictEqual(getCodexPermissionMode({ agents: { codex: {} } }), "intercept");
+    assert.strictEqual(isCodexPermissionInterceptEnabled({ agents: { codex: {} } }), true);
+  });
+
+  it("uses native mode only when explicitly selected", () => {
+    assert.strictEqual(
+      isCodexPermissionInterceptEnabled({ agents: { codex: { permissionMode: "intercept" } } }),
+      true
+    );
+    assert.strictEqual(
+      isCodexPermissionInterceptEnabled({ agents: { codex: { permissionMode: "native" } } }),
+      false
+    );
+  });
+});
+
+describe("Codex native notification sound gate", () => {
+  it("defaults off for missing / legacy prefs", () => {
+    assert.strictEqual(isCodexNativeNotificationSoundEnabled(null), false);
+    assert.strictEqual(isCodexNativeNotificationSoundEnabled({ agents: { codex: {} } }), false);
+  });
+
+  it("returns true only when nativeNotificationSoundEnabled === true", () => {
+    assert.strictEqual(
+      isCodexNativeNotificationSoundEnabled({
+        agents: { codex: { nativeNotificationSoundEnabled: true } },
+      }),
+      true
+    );
+    assert.strictEqual(
+      isCodexNativeNotificationSoundEnabled({
+        agents: { codex: { nativeNotificationSoundEnabled: false } },
+      }),
+      false
+    );
+  });
+});
+
 describe("setAgentFlag command", () => {
   function makeDeps(overrides = {}) {
     const calls = {
@@ -130,6 +225,8 @@ describe("setAgentFlag command", () => {
       stopMonitorForAgent: [],
       clearSessionsByAgent: [],
       dismissPermissionsByAgent: [],
+      syncIntegrationForAgent: [],
+      stopIntegrationForAgent: [],
     };
     return {
       calls,
@@ -139,6 +236,8 @@ describe("setAgentFlag command", () => {
         stopMonitorForAgent: (id) => calls.stopMonitorForAgent.push(id),
         clearSessionsByAgent: (id) => calls.clearSessionsByAgent.push(id),
         dismissPermissionsByAgent: (id) => calls.dismissPermissionsByAgent.push(id),
+        syncIntegrationForAgent: (id) => calls.syncIntegrationForAgent.push(id),
+        stopIntegrationForAgent: (id) => calls.stopIntegrationForAgent.push(id),
         ...overrides,
       },
     };
@@ -188,6 +287,7 @@ describe("setAgentFlag command", () => {
       deps
     );
     assert.strictEqual(r.status, "ok");
+    assert.strictEqual(calls.stopIntegrationForAgent.length, 0);
     assert.deepStrictEqual(calls.stopMonitorForAgent, ["codex"]);
     assert.deepStrictEqual(calls.clearSessionsByAgent, ["codex"]);
     assert.deepStrictEqual(calls.dismissPermissionsByAgent, ["codex"]);
@@ -196,7 +296,7 @@ describe("setAgentFlag command", () => {
     assert.strictEqual(r.commit.agents["claude-code"].enabled, true);
   });
 
-  it("enabling a previously-disabled agent starts the monitor", () => {
+  it("enabling a previously-disabled agent syncs its integration and starts the monitor", () => {
     const seeded = prefs.getDefaults();
     seeded.agents.codex = { enabled: false, permissionsEnabled: true };
     const { deps, calls } = makeDeps({ snapshot: seeded });
@@ -205,9 +305,26 @@ describe("setAgentFlag command", () => {
       deps
     );
     assert.strictEqual(r.status, "ok");
+    assert.deepStrictEqual(calls.syncIntegrationForAgent, ["codex"]);
     assert.deepStrictEqual(calls.startMonitorForAgent, ["codex"]);
     assert.strictEqual(calls.stopMonitorForAgent.length, 0);
     assert.strictEqual(r.commit.agents.codex.enabled, true);
+  });
+
+  it("disabling Claude Code stops its integration watcher before commit", () => {
+    const seeded = prefs.getDefaults();
+    seeded.agents["claude-code"] = { enabled: true, permissionsEnabled: true };
+    const { deps, calls } = makeDeps({ snapshot: seeded });
+    const r = commandRegistry.setAgentFlag(
+      { agentId: "claude-code", flag: "enabled", value: false },
+      deps
+    );
+    assert.strictEqual(r.status, "ok");
+    assert.deepStrictEqual(calls.stopIntegrationForAgent, ["claude-code"]);
+    assert.deepStrictEqual(calls.stopMonitorForAgent, ["claude-code"]);
+    assert.deepStrictEqual(calls.clearSessionsByAgent, ["claude-code"]);
+    assert.deepStrictEqual(calls.dismissPermissionsByAgent, ["claude-code"]);
+    assert.strictEqual(r.commit.agents["claude-code"].enabled, false);
   });
 
   it("toggling master flag preserves permissionsEnabled (no silent wipe)", () => {
@@ -292,5 +409,110 @@ describe("setAgentFlag command", () => {
     );
     assert.strictEqual(r.status, "ok");
     assert.strictEqual(r.commit.agents["copilot-cli"].enabled, false);
+  });
+
+  it("accepts notificationHookEnabled as a pure data flip — no side effects", () => {
+    // The idle-alert mute is a presentation-layer check inside state.js
+    // updateSession (gated right before setState("notification")), so
+    // toggling the flag has no monitor / session / bubble side effects.
+    const { deps, calls } = makeDeps();
+    const r = commandRegistry.setAgentFlag(
+      { agentId: "claude-code", flag: "notificationHookEnabled", value: false },
+      deps
+    );
+    assert.strictEqual(r.status, "ok");
+    assert.strictEqual(calls.stopMonitorForAgent.length, 0);
+    assert.strictEqual(calls.startMonitorForAgent.length, 0);
+    assert.strictEqual(calls.clearSessionsByAgent.length, 0);
+    assert.strictEqual(calls.dismissPermissionsByAgent.length, 0);
+    assert.strictEqual(r.commit.agents["claude-code"].notificationHookEnabled, false);
+    assert.strictEqual(
+      r.commit.agents["claude-code"].enabled,
+      true,
+      "master enabled flag must be preserved"
+    );
+    assert.strictEqual(
+      r.commit.agents["claude-code"].permissionsEnabled,
+      true,
+      "permissionsEnabled sibling must be preserved"
+    );
+  });
+
+  it("accepts Codex nativeNotificationSoundEnabled as a pure data flip", () => {
+    const { deps, calls } = makeDeps();
+    const r = commandRegistry.setAgentFlag(
+      { agentId: "codex", flag: "nativeNotificationSoundEnabled", value: true },
+      deps
+    );
+    assert.strictEqual(r.status, "ok");
+    assert.strictEqual(calls.stopMonitorForAgent.length, 0);
+    assert.strictEqual(calls.startMonitorForAgent.length, 0);
+    assert.strictEqual(calls.clearSessionsByAgent.length, 0);
+    assert.strictEqual(calls.dismissPermissionsByAgent.length, 0);
+    assert.strictEqual(r.commit.agents.codex.nativeNotificationSoundEnabled, true);
+    assert.strictEqual(r.commit.agents.codex.permissionMode, "intercept");
+  });
+});
+
+describe("setAgentPermissionMode command", () => {
+  function makeDeps(overrides = {}) {
+    const calls = { dismissPermissionsByAgent: [] };
+    return {
+      calls,
+      deps: {
+        snapshot: prefs.getDefaults(),
+        dismissPermissionsByAgent: (id) => calls.dismissPermissionsByAgent.push(id),
+        ...overrides,
+      },
+    };
+  }
+
+  it("treats switching Codex to the default intercept mode as a noop", () => {
+    const { deps, calls } = makeDeps();
+    const r = commandRegistry.setAgentPermissionMode(
+      { agentId: "codex", mode: "intercept" },
+      deps
+    );
+    assert.strictEqual(r.status, "ok");
+    assert.strictEqual(r.noop, true);
+    assert.deepStrictEqual(calls.dismissPermissionsByAgent, []);
+  });
+
+  it("switches Codex back to native mode and dismisses pending Codex bubbles", () => {
+    const seeded = prefs.getDefaults();
+    seeded.agents.codex.permissionMode = "intercept";
+    const { deps, calls } = makeDeps({ snapshot: seeded });
+    const r = commandRegistry.setAgentPermissionMode(
+      { agentId: "codex", mode: "native" },
+      deps
+    );
+    assert.strictEqual(r.status, "ok");
+    assert.strictEqual(r.commit.agents.codex.permissionMode, "native");
+    assert.deepStrictEqual(calls.dismissPermissionsByAgent, ["codex"]);
+  });
+
+  it("treats missing Codex permissionMode as intercept when switching to native", () => {
+    const seeded = prefs.getDefaults();
+    delete seeded.agents.codex.permissionMode;
+    const { deps, calls } = makeDeps({ snapshot: seeded });
+    const r = commandRegistry.setAgentPermissionMode(
+      { agentId: "codex", mode: "native" },
+      deps
+    );
+    assert.strictEqual(r.status, "ok");
+    assert.strictEqual(r.commit.agents.codex.permissionMode, "native");
+    assert.deepStrictEqual(calls.dismissPermissionsByAgent, ["codex"]);
+  });
+
+  it("rejects unsupported agents and modes", () => {
+    const { deps } = makeDeps();
+    assert.strictEqual(
+      commandRegistry.setAgentPermissionMode({ agentId: "claude-code", mode: "native" }, deps).status,
+      "error"
+    );
+    assert.strictEqual(
+      commandRegistry.setAgentPermissionMode({ agentId: "codex", mode: "auto" }, deps).status,
+      "error"
+    );
   });
 });

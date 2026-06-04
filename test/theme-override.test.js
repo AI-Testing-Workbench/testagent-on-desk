@@ -52,7 +52,6 @@ function makeCtx(overrides = {}) {
     pendingPermissions: [],
     resolvePermissionEntry: () => {},
     t: (k) => k,
-    showSessionId: false,
     focusTerminalWindow: () => {},
     processKill: () => { const e = new Error("ESRCH"); e.code = "ESRCH"; throw e; },
     getCursorScreenPoint: () => ({ x: 100, y: 100 }),
@@ -128,10 +127,10 @@ describe("state.js applyState() gate", () => {
     api = require("../src/state")(ctx);
     ctx._stateChanges.length = 0;
     ctx._sounds.length = 0;
-    api.updateSession(
-      "s1", "any", "PermissionRequest",
-      null, "/tmp", null, null, null, "claude-code", null, false, undefined,
-    );
+    api.updateSession("s1", "any", "PermissionRequest", {
+      cwd: "/tmp",
+      agentId: "claude-code",
+    });
     const played = ctx._stateChanges.map((a) => a[0]);
     assert.ok(!played.includes("notification"), "PermissionRequest 路径不该播 notification");
     assert.ok(!ctx._sounds.includes("confirm"), "不响 confirm");
@@ -170,10 +169,10 @@ describe("state.js applyState() gate", () => {
     ctx = makeCtx({ isOneshotDisabled: disabledSet(new Set(["attention"])) });
     api = require("../src/state")(ctx);
     // 先触发 working session 让 resolveDisplayState 返回 working
-    api.updateSession(
-      "s1", "working", "PreToolUse",
-      null, "/tmp", null, null, null, "claude-code", null, false, undefined,
-    );
+    api.updateSession("s1", "working", "PreToolUse", {
+      cwd: "/tmp",
+      agentId: "claude-code",
+    });
     ctx._stateChanges.length = 0;
     ctx._sounds.length = 0;
     api.applyState("attention");

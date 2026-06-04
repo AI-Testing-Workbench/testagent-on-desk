@@ -2,6 +2,7 @@
 
 const { app, BrowserWindow, screen, Menu, Tray, nativeImage } = require("electron");
 const path = require("path");
+const { keepOutOfTaskbar } = require("./taskbar");
 
 const isMac = process.platform === "darwin";
 const isWin = process.platform === "win32";
@@ -23,8 +24,6 @@ const SIZES = {
 // i18n string pool + translator factory live in src/i18n.js so the future
 // settings panel can share them. menu.js binds the translator to ctx.lang.
 const { createTranslator } = require("./i18n");
-
-const { shell } = require("electron");
 
 module.exports = function initMenu(ctx) {
   // ── Translation helper (bound to ctx.lang via the shared i18n module) ──
@@ -49,40 +48,18 @@ module.exports = function initMenu(ctx) {
     };
   }
 
-  // ── Theme submenu builder ──
-  function buildThemeSubmenu() {
-    const themes = ctx.discoverThemes ? ctx.discoverThemes() : [];
-    const activeId = ctx.getActiveThemeId ? ctx.getActiveThemeId() : "clawd";
-
-    const items = themes.map(theme => ({
-      label: theme.name + (theme.builtin ? "" : " ✦"),
-      type: "radio",
-      checked: theme.id === activeId,
+  function buildBringToPrimaryDisplayMenuItem() {
+    return {
+      label: t("bringPetToPrimaryDisplay"),
+      enabled: typeof ctx.bringPetToPrimaryDisplay === "function"
+        && !ctx.getMiniMode()
+        && !ctx.getMiniTransitioning(),
       click: () => {
-        if (theme.id === activeId) return;
-        // Shared commit gate with the settings panel. Failure leaves the
-        // store untouched so the radio stays on the previous theme.
-        Promise.resolve(ctx.settings.applyUpdate("theme", theme.id)).then(
-          (r) => {
-            if (r && r.status === "error") {
-              console.warn("Clawd: theme switch failed:", r.message);
-            }
-          },
-          (err) => console.warn("Clawd: theme switch threw:", err && err.message)
-        );
+        if (typeof ctx.bringPetToPrimaryDisplay === "function") {
+          ctx.bringPetToPrimaryDisplay();
+        }
       },
-    }));
-
-    items.push({ type: "separator" });
-    items.push({
-      label: t("openThemeDir"),
-      click: () => {
-        const dir = ctx.ensureUserThemesDir ? ctx.ensureUserThemesDir() : null;
-        if (dir) shell.openPath(dir);
-      },
-    });
-
-    return items;
+    };
   }
 
   // ── System tray ──
@@ -128,14 +105,9 @@ module.exports = function initMenu(ctx) {
       },
       buildMiniModeMenuItem(),
       { type: "separator" },
-      // The setters route through ctx.settings.applyUpdate(); main.js's
-      // settings subscriber handles reposition / menu rebuild / persist.
-      {
-        label: t("bubbleFollow"),
-        type: "checkbox",
-        checked: ctx.bubbleFollowPet,
-        click: (menuItem) => { ctx.bubbleFollowPet = menuItem.checked; },
-      },
+      // Quick-toggle noise controls. Other settings (language, theme, bubble
+      // follow, start-with-Claude, updates, etc.) were moved out of the tray
+      // and now live only in the Settings panel / About tab.
       {
         label: t("hideBubbles"),
         type: "checkbox",
@@ -148,17 +120,6 @@ module.exports = function initMenu(ctx) {
         checked: !ctx.soundMuted,
         click: (menuItem) => { ctx.soundMuted = !menuItem.checked; },
       },
-      {
-        label: t("showSessionId"),
-        type: "checkbox",
-        checked: ctx.showSessionId,
-        click: (menuItem) => { ctx.showSessionId = menuItem.checked; },
-      },
-      { type: "separator" },
-      {
-        label: t("theme"),
-        submenu: buildThemeSubmenu(),
-      },
       { type: "separator" },
       {
         label: t("startOnLogin"),
@@ -169,15 +130,6 @@ module.exports = function initMenu(ctx) {
         // checkbox updates without explicit buildTrayMenu/buildContextMenu().
         checked: ctx.openAtLogin,
         click: (menuItem) => { ctx.openAtLogin = menuItem.checked; },
-      },
-      {
-        label: t("startWithClaude"),
-        type: "checkbox",
-        checked: ctx.autoStartWithClaude,
-        enabled: ctx.manageClaudeHooksAutomatically,
-        // Setter triggers controller.applyUpdate; subscriber in main.js
-        // installs/uninstalls the SessionStart hook + rebuilds the menu.
-        click: (menuItem) => { ctx.autoStartWithClaude = menuItem.checked; },
       },
     ];
     // macOS: Dock and Menu Bar visibility toggles
@@ -206,25 +158,26 @@ module.exports = function initMenu(ctx) {
         label: t("settings"),
         click: () => ctx.openSettingsWindow(),
       },
-      { type: "separator" },
-      ctx.getUpdateMenuItem(),
-      { type: "separator" },
       {
-        label: t("language"),
-        submenu: [
-          { label: "English", type: "radio", checked: ctx.lang === "en", click: () => { ctx.lang = "en"; } },
-          { label: "中文", type: "radio", checked: ctx.lang === "zh", click: () => { ctx.lang = "zh"; } },
-          { label: "한국어", type: "radio", checked: ctx.lang === "ko", click: () => { ctx.lang = "ko"; } },
-        ],
+        label: t("openDashboard"),
+        click: () => {
+          if (typeof ctx.openDashboard === "function") ctx.openDashboard();
+        },
       },
+      buildBringToPrimaryDisplayMenuItem(),
+    );
+    // #329: surface the update item in the tray menu. The label switches
+    // to "Update available · vX" / "Update Ready" when applicable. Click
+    // routes to checkForUpdates / quitAndInstall via getUpdateMenuItem.
+    if (typeof ctx.getUpdateMenuItem === "function") {
+      const updateItem = ctx.getUpdateMenuItem();
+      if (updateItem) items.push({ type: "separator" }, updateItem);
+    }
+    items.push(
       { type: "separator" },
       {
         label: ctx.petHidden ? t("showPet") : t("hidePet"),
         click: () => ctx.togglePetVisibility(),
-      },
-      {
-        label: t("toggleShortcut").replace("{shortcut}", isMac ? "⌘⇧⌥C" : "Ctrl+Shift+Alt+C"),
-        enabled: false,
       },
       { type: "separator" },
       { label: t("quit"), click: () => requestAppQuit() },
@@ -265,6 +218,12 @@ module.exports = function initMenu(ctx) {
       hasShadow: false,
     });
 
+    // Chromium reclaims empty (about:blank) hidden renderers, which defeats
+    // the "persistent helper window" design — every right-click ends up
+    // re-spawning a renderer process. Load a minimal data: URL so the
+    // renderer has a real document and stays alive across menu invocations.
+    ctx.contextMenuOwner.loadURL("data:text/html,%3C!doctype%20html%3E");
+
     // macOS: ensure owner can appear on fullscreen Spaces
     ctx.reapplyMacVisibility();
 
@@ -290,6 +249,7 @@ module.exports = function initMenu(ctx) {
     const cursor = screen.getCursorScreenPoint();
     owner.setBounds({ x: cursor.x, y: cursor.y, width: 1, height: 1 });
     owner.show();
+    keepOutOfTaskbar(owner);
     owner.focus();
 
     ctx.menuOpen = true;
@@ -300,6 +260,7 @@ module.exports = function initMenu(ctx) {
         if (owner && !owner.isDestroyed()) owner.hide();
         if (ctx.win && !ctx.win.isDestroyed()) {
           ctx.win.showInactive();
+          keepOutOfTaskbar(ctx.win);
           if (isMac) {
             ctx.reapplyMacVisibility();
           } else if (isWin) {
@@ -310,88 +271,14 @@ module.exports = function initMenu(ctx) {
     });
   }
 
-  function buildProportionalSubmenu() {
-    const isP = ctx.isProportionalMode && ctx.isProportionalMode();
-    const currentRatio = isP ? parseFloat(ctx.currentSize.slice(2)) : 0;
-    const isCustom = isP && !ctx.PROPORTIONAL_RATIOS.includes(currentRatio);
-    const items = ctx.PROPORTIONAL_RATIOS.map(r => ({
-      label: t("proportionalPct").replace("{n}", r),
-      type: "radio",
-      checked: ctx.currentSize === `P:${r}`,
-      click: () => resizeWindow(`P:${r}`),
-    }));
-    items.push({ type: "separator" });
-    items.push({
-      label: isCustom
-        ? `${t("proportionalCustom")} (${currentRatio}%)`
-        : t("proportionalCustom"),
-      type: "radio",
-      checked: isCustom,
-      click: () => promptCustomRatio(isCustom ? currentRatio : 10),
-    });
-    return items;
-  }
-
-  function promptCustomRatio(defaultVal) {
-    const html = `<!DOCTYPE html><html><head><meta charset="utf-8">
-<style>
-  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-         margin: 0; padding: 16px; background: #f5f5f5; user-select: none; }
-  label { display: block; font-size: 13px; margin-bottom: 8px; color: #333; }
-  input { width: 80px; padding: 4px 8px; font-size: 14px; border: 1px solid #ccc;
-          border-radius: 4px; outline: none; text-align: center; }
-  input:focus { border-color: #4a90d9; }
-  .buttons { margin-top: 12px; text-align: right; }
-  button { padding: 4px 16px; font-size: 13px; border-radius: 4px; border: 1px solid #ccc;
-           background: #fff; cursor: pointer; margin-left: 6px; }
-  button.primary { background: #4a90d9; color: #fff; border-color: #4a90d9; }
-  .hint { font-size: 11px; color: #999; margin-top: 4px; }
-</style></head><body>
-<label>${t("proportionalCustomMsg")}</label>
-<input id="v" type="number" min="1" max="75" step="1" value="${defaultVal}" autofocus>
-<div class="hint">1% ≈ tiny &nbsp; 15% ≈ large &nbsp; 75% = max</div>
-<div class="buttons">
-  <button onclick="window.close()">Cancel</button>
-  <button class="primary" onclick="ok()">OK</button>
-</div>
-<script>
-  const inp = document.getElementById("v");
-  inp.select();
-  inp.addEventListener("keydown", e => { if (e.key === "Enter") ok(); if (e.key === "Escape") window.close(); });
-  function ok() { const n = parseFloat(inp.value); if (n >= 1 && n <= 75) window.promptAPI.submit(n); window.close(); }
-</script></body></html>`;
-
-    const promptWin = new BrowserWindow({
-      width: 280, height: 140,
-      resizable: false, minimizable: false, maximizable: false,
-      alwaysOnTop: true, skipTaskbar: true,
-      frame: false, transparent: false,
-      show: false,
-      webPreferences: {
-        preload: path.join(__dirname, "preload-prompt.js"),
-        nodeIntegration: false,
-        contextIsolation: true,
-      },
-    });
-    promptWin.loadURL("data:text/html;charset=utf-8," + encodeURIComponent(html));
-    promptWin.once("ready-to-show", () => promptWin.show());
-
-    const { ipcMain } = require("electron");
-    const handler = (_, val) => {
-      resizeWindow(`P:${val}`);
-      ipcMain.removeListener("proportional-custom", handler);
-    };
-    ipcMain.on("proportional-custom", handler);
-    promptWin.on("closed", () => {
-      ipcMain.removeListener("proportional-custom", handler);
-    });
-  }
-
-  function buildDisplaySubmenu() {
-    const displays = screen.getAllDisplays();
+  function buildDisplaySubmenu(displays = screen.getAllDisplays()) {
     if (displays.length <= 1) return [{ label: t("displayLabel").replace("{n}", 1), enabled: false }];
-    const current = ctx.win && !ctx.win.isDestroyed()
-      ? screen.getDisplayNearestPoint(ctx.win.getBounds())
+    const currentBounds = ctx.getPetWindowBounds ? ctx.getPetWindowBounds() : null;
+    const current = currentBounds
+      ? screen.getDisplayNearestPoint({
+        x: Math.round(currentBounds.x + currentBounds.width / 2),
+        y: Math.round(currentBounds.y + currentBounds.height / 2),
+      })
       : null;
     return displays.map((d, i) => {
       const isPrimary = d.bounds.x === 0 && d.bounds.y === 0;
@@ -410,36 +297,19 @@ module.exports = function initMenu(ctx) {
     if (!ctx.win || ctx.win.isDestroyed()) return;
     if (ctx.getMiniMode()) return;
     const wa = display.workArea;
-    if (ctx.isProportionalMode && ctx.isProportionalMode()) {
-      const ratio = parseFloat(ctx.currentSize.slice(2)) || 10;
-      const px = Math.round(wa.width * ratio / 100);
-      const size = { width: px, height: px };
-      const x = Math.round(wa.x + (wa.width - size.width) / 2);
-      const y = Math.round(wa.y + (wa.height - size.height) / 2);
-      ctx.win.setBounds({ x, y, width: size.width, height: size.height });
-    } else {
-      const size = SIZES[ctx.currentSize] || ctx.getCurrentPixelSize();
-      const x = Math.round(wa.x + (wa.width - size.width) / 2);
-      const y = Math.round(wa.y + (wa.height - size.height) / 2);
-      ctx.win.setBounds({ x, y, width: size.width, height: size.height });
-    }
+    const size = typeof ctx.getEffectiveCurrentPixelSize === "function"
+      ? ctx.getEffectiveCurrentPixelSize(wa)
+      : (SIZES[ctx.currentSize] || ctx.getCurrentPixelSize(wa));
+    const x = Math.round(wa.x + (wa.width - size.width) / 2);
+    const y = Math.round(wa.y + (wa.height - size.height) / 2);
+    ctx.applyPetWindowBounds({ x, y, width: size.width, height: size.height });
     ctx.syncHitWin();
-    if (ctx.bubbleFollowPet) ctx.repositionBubbles();
+    ctx.repositionBubbles();
     ctx.flushRuntimeStateToPrefs();
   }
 
   function buildContextMenu() {
     const template = [
-      {
-        label: t("proportional"),
-        submenu: buildProportionalSubmenu(),
-      },
-      {
-        label: t("sendToDisplay"),
-        submenu: buildDisplaySubmenu(),
-        visible: screen.getAllDisplays().length > 1 && !ctx.getMiniMode(),
-      },
-      { type: "separator" },
       {
         ...buildMiniModeMenuItem(),
       },
@@ -450,15 +320,43 @@ module.exports = function initMenu(ctx) {
       },
       { type: "separator" },
       {
-        label: `${t("sessions")} (${ctx.sessions.size})`,
-        submenu: ctx.buildSessionSubmenu(),
+        label: t("openDashboard"),
+        click: () => {
+          if (typeof ctx.openDashboard === "function") ctx.openDashboard();
+        },
       },
       { type: "separator" },
       {
-        label: t("theme"),
-        submenu: buildThemeSubmenu(),
+        label: t("newSession"),
+        submenu: [
+          {
+            label: t("newSessionSelectFolder"),
+            click: () => {
+              if (typeof ctx.newSessionWithFolder === "function") ctx.newSessionWithFolder(t);
+            },
+          },
+          {
+            label: t("newSessionHomeDir"),
+            click: () => {
+              if (typeof ctx.newSessionInCurrentDir === "function") ctx.newSessionInCurrentDir(t);
+            },
+          },
+        ],
       },
     ];
+    // sendToDisplay is a multi-display-only tail entry. Push dynamically
+    // (rather than visible:false) — Electron leaves a phantom gap for
+    // hidden separators otherwise.
+    const displays = screen.getAllDisplays();
+    if (displays.length > 1 && !ctx.getMiniMode()) {
+      template.push(
+        { type: "separator" },
+        {
+          label: t("sendToDisplay"),
+          submenu: buildDisplaySubmenu(displays),
+        },
+      );
+    }
     // macOS: Dock and Menu Bar visibility toggles
     if (isMac) {
       template.push(
@@ -485,11 +383,13 @@ module.exports = function initMenu(ctx) {
         label: t("settings"),
         click: () => ctx.openSettingsWindow(),
       },
-      { type: "separator" },
-      {
-        label: t("toggleShortcut").replace("{shortcut}", isMac ? "⌘⇧⌥C" : "Ctrl+Shift+Alt+C"),
-        enabled: false,
-      },
+    );
+    // #329: surface the update item in the right-click context menu too.
+    if (typeof ctx.getUpdateMenuItem === "function") {
+      const updateItem = ctx.getUpdateMenuItem();
+      if (updateItem) template.push({ type: "separator" }, updateItem);
+    }
+    template.push(
       { type: "separator" },
       { label: t("quit"), click: () => requestAppQuit() },
     );
@@ -502,22 +402,28 @@ module.exports = function initMenu(ctx) {
     popupMenuAt(ctx.contextMenu);
   }
 
-  function resizeWindow(sizeKey) {
+  function resizeWindow(sizeKey, options = {}) {
+    const mode = options.mode || (options.persist === false ? "preview" : "commit");
+    const persist = mode !== "preview";
     // Setter routes through controller.applyUpdate("size", ...) — subscriber
     // rebuilds menus on commit. We still need to physically resize the
     // window and capture the new bounds at the end.
-    ctx.currentSize = sizeKey;
-    const size = SIZES[sizeKey] || ctx.getCurrentPixelSize();
+    if (persist) ctx.currentSize = sizeKey;
+    const size = (typeof ctx.getPixelSizeFor === "function")
+      ? ctx.getPixelSizeFor(sizeKey)
+      : (SIZES[sizeKey] || ctx.getCurrentPixelSize());
     if (!ctx.miniHandleResize(sizeKey)) {
       if (ctx.win && !ctx.win.isDestroyed()) {
-        const { x, y } = ctx.win.getBounds();
-        const clamped = ctx.clampToScreen(x, y, size.width, size.height);
-        ctx.win.setBounds({ ...clamped, width: size.width, height: size.height });
-        ctx.syncHitWin();
+        const { x, y } = ctx.getPetWindowBounds();
+        const clamped = ctx.clampToScreenVisual(x, y, size.width, size.height);
+        ctx.applyPetWindowBounds({ ...clamped, width: size.width, height: size.height });
       }
     }
-    if (ctx.bubbleFollowPet) ctx.repositionBubbles();
-    ctx.flushRuntimeStateToPrefs();
+    if (mode !== "preview") {
+      ctx.syncHitWin();
+      ctx.repositionBubbles();
+      if (persist) ctx.flushRuntimeStateToPrefs();
+    }
   }
 
   return {
@@ -527,6 +433,7 @@ module.exports = function initMenu(ctx) {
     rebuildAllMenus,
     createTray,
     destroyTray,
+    getTray: () => ctx.tray,
     applyDockVisibility,
     ensureContextMenuOwner,
     popupMenuAt,
