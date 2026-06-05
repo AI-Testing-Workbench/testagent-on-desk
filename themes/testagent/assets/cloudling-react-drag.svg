@@ -1,0 +1,85 @@
+<svg id="cloudling" xmlns="http://www.w3.org/2000/svg" width="880" height="720" viewBox="-32 -24 88 72" preserveAspectRatio="xMidYMid meet">
+<style><![CDATA[
+.edge-rim-tight { stroke-opacity: .08; }
+.edge-rim-soft { stroke-opacity: .06; }
+.edge-contact { stroke-opacity: .08; }
+.drag-wobble {
+  transform-origin: 12px 12px;
+  animation: drag-wobble var(--wobble-period, 0.9s) infinite alternate ease-in-out;
+}
+@keyframes drag-wobble {
+  0%   { transform: rotate(calc(-1 * var(--wobble-deg, 11deg))); }
+  100% { transform: rotate(var(--wobble-deg, 11deg)); }
+}
+.drag-breath {
+  transform-origin: 12px 12px;
+  animation: drag-breath var(--breath-period, 5s) infinite ease-in-out;
+}
+@keyframes drag-breath {
+  0%, 100% { transform: scale(var(--breath-low, 0.96)); }
+  50%      { transform: scale(1); }
+}
+@media (prefers-color-scheme: light) {
+.edge-rim-tight { stroke-opacity: .15; }
+.edge-rim-soft { stroke-opacity: .10; }
+.edge-contact { stroke-opacity: .18; }
+.cloud-drop-shadow { flood-opacity: .13; }
+.food-cloud-shadow { flood-opacity: .28; flood-color: #5060FF; }
+.food-cloud > path {
+  stroke: #5870E8 !important;
+  stroke-width: 1.2 !important;
+  stroke-opacity: .9 !important;
+  vector-effect: non-scaling-stroke !important;
+}
+}
+]]></style>
+    <defs>
+      <linearGradient id="testagent-border" x1="0%" y1="0%" x2="100%" y2="100%">
+        <stop offset="0%" stop-color="#4fc3f7"/>
+        <stop offset="50%" stop-color="#2979ff"/>
+        <stop offset="100%" stop-color="#69f0ae"/>
+      </linearGradient>
+      <linearGradient id="body-grad" x1="12" y1="2" x2="12" y2="22" gradientUnits="userSpaceOnUse">
+        <stop offset="0" stop-color="#e8f4ff"/>
+        <stop offset="0.5" stop-color="#d4e9ff"/>
+        <stop offset="1" stop-color="#b8deff"/>
+      </linearGradient>
+      <linearGradient id="eye-grad" x1="12" y1="3" x2="12" y2="21" gradientUnits="userSpaceOnUse">
+        <stop offset="0" stop-color="#B1A7FF"/>
+        <stop offset="0.5" stop-color="#7A9DFF"/>
+        <stop offset="1" stop-color="#3941FF"/>
+      </linearGradient>
+      <radialGradient id="hi-grad" cx="0.45" cy="0.25" r="0.55">
+        <stop offset="0" stop-color="#ffffff" stop-opacity="0.9"/>
+        <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+      </radialGradient>
+      <filter id="drop" x="-40%" y="-40%" width="180%" height="180%">
+        <feDropShadow class="cloud-drop-shadow" id="drop-shadow" dx="0" dy="0.6" stdDeviation="0.8" flood-color="#3941FF" flood-opacity="0.18"/>
+      </filter>
+      <filter id="edge-blur" x="-40%" y="-40%" width="180%" height="180%">
+        <feGaussianBlur stdDeviation="0.16"/>
+      </filter>
+      <path id="cloud-shape" d="M 12 2 A 10 10 0 1 1 12 22 A 10 10 0 1 1 12 2 Z"/>
+      <clipPath id="cloud-clip">
+        <use href="#cloud-shape"/>
+      
+      </clipPath>
+    </defs>
+
+    <!-- 外层 wobble (自旋摇晃, pivot 中心) -->
+    <g id="wobble-layer" class="drag-wobble">
+      <!-- 内层 breath (呼吸, pivot 中心) -->
+      <g id="breath-layer" class="drag-breath">
+        <!-- edge-system removed for clean testagent style -->
+        <g filter="url(#drop)">
+          <use href="#cloud-shape" fill="url(#body-grad)"/>
+          <rect x="1" y="2" width="22" height="11" fill="url(#hi-grad)" clip-path="url(#cloud-clip)"/>
+        </g>
+        <g id="eyes-gt-lt" fill="none" stroke="url(#eye-grad)" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M 8.20 10.30 L 9.80 12.00 L 8.20 13.70"/>
+          <path d="M 15.80 10.30 L 14.20 12.00 L 15.80 13.70"/>
+        </g>
+      </g>
+    </g>
+
+</svg>

@@ -1,0 +1,228 @@
+<svg id="cloudling" xmlns="http://www.w3.org/2000/svg" width="480" height="480" viewBox="-12 -12 48 48" preserveAspectRatio="xMidYMid meet">
+<style><![CDATA[
+.v {
+  text-align: right;
+  font: 600 10px ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: #7A9DFF;
+}
+.edge-rim-tight { stroke-opacity: .08; }
+.edge-rim-soft { stroke-opacity: .06; }
+.edge-contact { stroke-opacity: .08; }
+.duration-probe {
+  opacity: 0;
+  animation: mini-enter-duration-probe 1.25s linear 1 both;
+}
+@keyframes mini-enter-duration-probe {
+  from { transform: translateX(0); }
+  to { transform: translateX(0); }
+}
+@media (prefers-color-scheme: light) {
+.v { color: #3941FF; }
+.edge-rim-tight { stroke-opacity: .15; }
+.edge-rim-soft { stroke-opacity: .10; }
+.edge-contact { stroke-opacity: .18; }
+.cloud-drop-shadow { flood-opacity: .13; }
+.food-cloud-shadow { flood-opacity: .28; flood-color: #5060FF; }
+.food-cloud > path {
+  stroke: #5870E8 !important;
+  stroke-width: 1.2 !important;
+  stroke-opacity: .9 !important;
+  vector-effect: non-scaling-stroke !important;
+}
+}
+]]></style>
+      <defs>
+      <linearGradient id="testagent-border" x1="0%" y1="0%" x2="100%" y2="100%">
+        <stop offset="0%" stop-color="#4fc3f7"/>
+        <stop offset="50%" stop-color="#2979ff"/>
+        <stop offset="100%" stop-color="#69f0ae"/>
+      </linearGradient>
+        <linearGradient id="body-grad" x1="12" y1="2" x2="12" y2="22" gradientUnits="userSpaceOnUse">
+        <stop offset="0" stop-color="#e8f4ff"/>
+        <stop offset="0.5" stop-color="#d4e9ff"/>
+        <stop offset="1" stop-color="#b8deff"/>
+      </linearGradient>
+        <linearGradient id="eye-grad" x1="12" y1="3" x2="12" y2="21" gradientUnits="userSpaceOnUse">
+          <stop offset="0" stop-color="#B1A7FF"/>
+          <stop offset="0.5" stop-color="#7A9DFF"/>
+          <stop offset="1" stop-color="#3941FF"/>
+        </linearGradient>
+        <radialGradient id="hi-grad" cx="0.45" cy="0.25" r="0.55">
+          <stop offset="0" stop-color="#ffffff" stop-opacity="0.9"/>
+          <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+        </radialGradient>
+        <filter id="drop" x="-40%" y="-40%" width="180%" height="180%">
+          <feDropShadow class="cloud-drop-shadow" dx="0" dy="0.55" stdDeviation="0.72" flood-color="#3941FF" flood-opacity="0.17"/>
+        </filter>
+        <filter id="edge-blur" x="-40%" y="-40%" width="180%" height="180%">
+          <feGaussianBlur stdDeviation="0.16"/>
+        </filter>
+        <path id="cloud-shape" d="M 12 2 A 10 10 0 1 1 12 22 A 10 10 0 1 1 12 2 Z"/>
+        <clipPath id="cloud-clip">
+          <use href="#cloud-shape"/>
+      
+        </clipPath>
+      </defs>
+
+      <rect x="-12" y="-12" width="48" height="48" fill="transparent"/>
+      <rect class="duration-probe" x="-12" y="-12" width="0.01" height="0.01" fill="transparent"/>
+
+      <g id="enter-js">
+        <g id="body-js">
+          <g id="breath-js">
+            <!-- edge-system removed for clean testagent style -->
+            <g filter="url(#drop)">
+              <use href="#cloud-shape" fill="url(#body-grad)"/>
+              <rect x="1" y="2" width="22" height="11" fill="url(#hi-grad)" clip-path="url(#cloud-clip)"/>
+            </g>
+          </g>
+        </g>
+        <g id="eyes-js">
+          <g id="blink-js">
+            <ellipse id="eye-l" cx="8" cy="11.83" rx="1.3" ry="2.5" fill="#2979ff"/>
+            <ellipse id="eye-r" cx="16" cy="11.83" rx="1.3" ry="2.5" fill="#2979ff"/>
+          </g>
+        </g>
+      </g>
+    <g id="__cloudling-export-shims" opacity="0" pointer-events="none" style="display:none">
+<g id="pose-readout"></g>
+<g id="progress-readout"></g>
+</g>
+
+<script type="application/ecmascript"><![CDATA[
+const svg = document.getElementById("cloudling");
+const enter = document.getElementById("enter-js");
+const eyeGrad = document.getElementById("eye-grad");
+const eyeL = document.getElementById("eye-l");
+const eyeR = document.getElementById("eye-r");
+const progressReadout = document.getElementById("progress-readout");
+const poseReadout = document.getElementById("pose-readout");
+
+const EYE_BASE = {
+  l: { cx: 8, cy: 11.83, rx: 1.3, ry: 2.5 },
+  r: { cx: 16, cy: 11.83, rx: 1.3, ry: 2.5 }
+};
+const params = {
+  duration: 1.25,
+  startX: 15.8,
+  rollDeg: 28,
+  overshoot: 1.2,
+  squash: 0.07,
+  eyeOpen: 0.64,
+};
+let startT = performance.now();
+let playing = true;
+let heldProgress = 0;
+let lastState = null;
+
+function clamp(v, min, max) {
+  return Math.max(min, Math.min(max, v));
+}
+
+function lerp(a, b, t) {
+  return a + (b - a) * t;
+}
+
+function smoothstep(edge0, edge1, x) {
+  const t = clamp((x - edge0) / Math.max(edge1 - edge0, 0.0001), 0, 1);
+  return t * t * (3 - 2 * t);
+}
+
+function easeOutCubic(t) {
+  return 1 - Math.pow(1 - t, 3);
+}
+
+function sampleKeyframes(p, frames) {
+  if (p <= frames[0].p) return frames[0].v;
+  for (let i = 1; i < frames.length; i++) {
+    const prev = frames[i - 1];
+    const next = frames[i];
+    if (p <= next.p) {
+      const t = smoothstep(prev.p, next.p, p);
+      return lerp(prev.v, next.v, t);
+    }
+  }
+  return frames[frames.length - 1].v;
+}
+
+function stateAt(p) {
+  const bodyP = smoothstep(0.08, 1.0, p);
+  const tx = sampleKeyframes(p, [
+    { p: 0.00, v: params.startX },
+    { p: 0.08, v: params.startX },
+    { p: 0.47, v: -params.overshoot },
+    { p: 0.62, v: params.overshoot * 0.42 },
+    { p: 0.78, v: -params.overshoot * 0.14 },
+    { p: 1.00, v: 0 },
+  ]);
+  const rot = sampleKeyframes(p, [
+    { p: 0.00, v: params.rollDeg },
+    { p: 0.08, v: params.rollDeg },
+    { p: 0.47, v: -params.rollDeg * 0.32 },
+    { p: 0.62, v: params.rollDeg * 0.13 },
+    { p: 0.78, v: -params.rollDeg * 0.05 },
+    { p: 1.00, v: 0 },
+  ]);
+  const ty = sampleKeyframes(p, [
+    { p: 0.00, v: 0 },
+    { p: 0.40, v: 0.18 },
+    { p: 0.60, v: -0.12 },
+    { p: 0.82, v: 0.04 },
+    { p: 1.00, v: 0 },
+  ]);
+  const impact = Math.sin(Math.PI * smoothstep(0.34, 0.62, p));
+  const settle = Math.sin(Math.PI * smoothstep(0.58, 0.86, p)) * 0.45;
+  const squash = params.squash * (impact - settle);
+  const sx = 1 - squash;
+  const sy = 1 + squash * 0.85;
+  const eyeOpenBase = smoothstep(params.eyeOpen, params.eyeOpen + 0.20, p);
+  const eyePop = Math.sin(Math.PI * smoothstep(params.eyeOpen + 0.12, params.eyeOpen + 0.26, p)) * 0.08;
+  const eyeScale = p < params.eyeOpen ? 0.07 : clamp(eyeOpenBase + eyePop, 0.07, 1.08);
+  const flowOffset = Math.sin(2 * Math.PI * easeOutCubic(bodyP)) * 2.2;
+  return { p, tx, ty, rot, sx, sy, eyeScale, flowOffset };
+}
+
+function setEyeRect(rect, base, scale) {
+  const h = Math.max(base.h * scale, 0.16);
+  const y = base.y + (base.h - h) / 2;
+  const rx = Math.min(base.rx, h / 2);
+  rect.setAttribute("height", h.toFixed(3));
+  rect.setAttribute("y", y.toFixed(3));
+  rect.setAttribute("rx", rx.toFixed(3));
+  rect.setAttribute("ry", rx.toFixed(3));
+}
+
+function renderProgress(p) {
+  const s = stateAt(clamp(p, 0, 1));
+  enter.setAttribute(
+    "transform",
+    `translate(${s.tx.toFixed(3)} ${s.ty.toFixed(3)}) translate(12 12) rotate(${s.rot.toFixed(3)}) scale(${s.sx.toFixed(4)} ${s.sy.toFixed(4)}) translate(-12 -12)`
+  );
+  setEyeRect(eyeL, EYE_BASE.l, s.eyeScale);
+  setEyeRect(eyeR, EYE_BASE.r, s.eyeScale);
+  eyeGrad.setAttribute("y1", (3 + s.flowOffset).toFixed(2));
+  eyeGrad.setAttribute("y2", (21 + s.flowOffset).toFixed(2));
+  progressReadout.textContent = `progress: ${s.p.toFixed(2)}`;
+  poseReadout.textContent = `tx: ${s.tx.toFixed(2)}, rot: ${s.rot.toFixed(1)}deg, scale: ${s.sx.toFixed(2)} ${s.sy.toFixed(2)}`;
+  lastState = s;
+}
+
+function tick(now) {
+  if (playing) {
+    const p = (now - startT) / (params.duration * 1000);
+    heldProgress = clamp(p, 0, 1);
+    renderProgress(heldProgress);
+    if (p >= 1) playing = false;
+  }
+  requestAnimationFrame(tick);
+}
+
+function replay() {
+  startT = performance.now();
+  heldProgress = 0;
+  playing = true;
+  renderProgress(0);
+}
+requestAnimationFrame(tick);
+]]></script>
+</svg>
