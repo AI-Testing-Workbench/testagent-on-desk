@@ -15,7 +15,7 @@
 }
 .timeline-fill {
   height: 100%; width: 0; border-radius: 2px;
-  background: linear-gradient(to right, #B1A7FF, #FFD3B3, #FCE3B0, #FCC9DD);
+  background: linear-gradient(to right, #4fc3f7, #FFD3B3, #FCE3B0, #FCC9DD);
 }
 .edge-rim-tight { stroke-opacity: .08; }
 .edge-rim-soft { stroke-opacity: .06; }
@@ -41,17 +41,16 @@
         <stop offset="50%" stop-color="#2979ff"/>
         <stop offset="100%" stop-color="#69f0ae"/>
       </linearGradient>
-      <linearGradient id="body-grad" x1="12" y1="2" x2="12" y2="22" gradientUnits="userSpaceOnUse">
-        <stop offset="0" stop-color="#e8f4ff"/>
-        <stop offset="0.5" stop-color="#d4e9ff"/>
-        <stop offset="1" stop-color="#b8deff"/>
-      </linearGradient>
+      <radialGradient id="body-fill" cx="50%" cy="40%" r="60%">
+        <stop offset="0%" stop-color="#e8f4ff"/>
+        <stop offset="100%" stop-color="#c8e0ff"/>
+      </radialGradient>
       <linearGradient id="eye-grad" x1="0" y1="3" x2="0" y2="21" gradientUnits="userSpaceOnUse">
-        <stop offset="0" stop-color="#B1A7FF"/>
-        <stop offset="0.5" stop-color="#7A9DFF"/>
-        <stop offset="1" stop-color="#3941FF"/>
+        <stop offset="0" stop-color="#69f0ae"/>
+        <stop offset="0.5" stop-color="#4fc3f7"/>
+        <stop offset="1" stop-color="#2979ff"/>
       </linearGradient>
-      <radialGradient id="hi-grad" cx="0.45" cy="0.25" r="0.55">
+      <radialGradient id="hi-grad" cx="50%" cy="35%" r="60%">
         <stop offset="0" stop-color="#ffffff" stop-opacity="0.9"/>
         <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
       </radialGradient>
@@ -77,7 +76,7 @@
       <path id="warm-cloud-path" d="M-15.6 5.4c-2.4 0-4.4-1.8-4.4-4.0 0-1.9 1.5-3.6 3.5-4.0 .4-2.7 3.0-4.8 6.2-4.8 1.2 0 2.3 .3 3.3 .9 1.4-2.1 3.9-3.5 6.8-3.5 3.6 0 6.6 2.1 7.4 5.0 3.4 0 6.0 2.4 6.0 5.3 0 2.8-2.5 5.0-5.6 5.0H-15.6z"/>
 
       <filter id="cloud-shadow" x="-50%" y="-50%" width="200%" height="200%">
-        <feDropShadow class="cloud-drop-shadow" dx="0" dy="0.6" stdDeviation="0.8" flood-color="#3941FF" flood-opacity="0.18"/>
+        <feDropShadow class="cloud-drop-shadow" dx="0" dy="0.6" stdDeviation="0.8" flood-color="#2979ff" flood-opacity="0.18"/>
       </filter>
       <filter id="edge-blur" x="-40%" y="-40%" width="180%" height="180%">
         <feGaussianBlur stdDeviation="0.16"/>
@@ -121,15 +120,15 @@
         <g id="cloudShape">
           <!-- edge-system removed for clean testagent style -->
           <g filter="url(#cloud-shadow)">
-            <use href="#cloud-shape" fill="url(#body-grad)"/>
-            <rect x="1" y="2" width="22" height="11" fill="url(#hi-grad)" clip-path="url(#cloud-clip)"/>
+            <use href="#cloud-shape" fill="url(#body-fill)" stroke="url(#testagent-border)" stroke-width="1.2"/>
+            <circle cx="12" cy="7" r="7" fill="url(#hi-grad)" clip-path="url(#cloud-clip)"/>
           </g>
         </g>
       </g>
       <g id="eyeLayer">
         <g id="capsuleEyes">
-          <rect id="capL" x="7.7" y="9.5" width="2.6" height="5" rx="1.3" ry="1.3" fill="#2979ff" />
-          <rect id="capR" x="13.7" y="9.5" width="2.6" height="5" rx="1.3" ry="1.3" fill="#2979ff" />
+          <ellipse id="capL" cx="8.67" cy="9.78" rx="1.36" ry="2.18" fill="#2979ff" stroke="#fff" stroke-width="0.08" stroke-opacity="0.55"/>
+          <ellipse id="capR" cx="15.33" cy="9.78" rx="1.36" ry="2.18" fill="#2979ff" stroke="#fff" stroke-width="0.08" stroke-opacity="0.55"/>
         </g>
       </g>
     </g>
@@ -239,14 +238,11 @@ function phaseAt(p) {
   return { name: 'recover', local: remap(p, 5.85 / 6.20, 1) };
 }
 
-function setEyeRect(node, cx, cy, w, h) {
-  node.setAttribute('width', w.toFixed(3));
-  node.setAttribute('height', h.toFixed(3));
-  const rx = Math.min(w / 2, h / 2, 1.35);
-  node.setAttribute('rx', rx.toFixed(3));
-  node.setAttribute('ry', rx.toFixed(3));
-  node.setAttribute('x', (cx - w / 2).toFixed(3));
-  node.setAttribute('y', (cy - h / 2).toFixed(3));
+function setEyeEllipse(node, cx, cy, rx, ry) {
+  node.setAttribute('cx', cx.toFixed(3));
+  node.setAttribute('cy', cy.toFixed(3));
+  node.setAttribute('rx', Math.max(0.15, rx).toFixed(3));
+  node.setAttribute('ry', Math.max(0.08, ry).toFixed(3));
 }
 
 // ===== 暖云更新 =====
@@ -571,11 +567,11 @@ function updateCloud(t, p, phase, v) {
   // 眼睛 layer 整体偏移 (eye-track)
   eyeLayer.setAttribute('transform', `translate(${eyeShiftX.toFixed(3)} ${eyeShiftY.toFixed(3)})`);
 
-  // 眼睛 capsule 大小
-  const eyeW = 2.6 * widenFactor;
-  const eyeH = 5.0 * heightFactor;
-  setEyeRect(capL, 9, 12, eyeW, eyeH);
-  setEyeRect(capR, 15, 12, eyeW, eyeH);
+  // 眼睛 ellipse 大小
+  const baseRx = 1.36 * widenFactor;
+  const baseRy = 2.18 * heightFactor;
+  setEyeEllipse(capL, 8.67, 9.78, baseRx, baseRy);
+  setEyeEllipse(capR, 15.33, 9.78, baseRx, baseRy);
 
   return { tx, ty, rot };
 }

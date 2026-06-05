@@ -4,7 +4,7 @@
 .edge-rim-tight { stroke-opacity: .08; }
 .edge-rim-soft { stroke-opacity: .06; }
 .edge-contact { stroke-opacity: .08; }
-.orbit-track { stroke: rgba(177,167,255,.13); stroke-width: 0.13; fill: none; stroke-dasharray: 0.45 0.65; }
+.orbit-track { stroke: rgba(79,195,247,.13); stroke-width: 0.13; fill: none; stroke-dasharray: 0.45 0.65; }
 .trail-spark { pointer-events: none; }
 .spark-shell { stroke: rgba(255,255,255,.82); stroke-width: 0.075; stroke-linejoin: round; }
 .spark-core { fill: #FFFDF0; opacity: .20; }
@@ -14,13 +14,13 @@
 .edge-rim-soft { stroke-opacity: .10; }
 .edge-contact { stroke-opacity: .18; }
 .cloud-drop-shadow { flood-opacity: .13; }
-.orbit-track { stroke: rgba(57,65,255,.22); }
+.orbit-track { stroke: rgba(41,121,255,.22); }
 .spark-shell { stroke: rgba(255,255,255,.82); stroke-width: 0.075; }
 .spark-core { opacity: .20; }
 #taskTrailLayer use, #taskABack, #taskBBack, #taskCBack, #taskDBack, #taskAFront, #taskBFront, #taskCFront, #taskDFront { filter: url(#task-glow); }
-.food-cloud-shadow { flood-opacity: .28; flood-color: #5060FF; }
+.food-cloud-shadow { flood-opacity: .28; flood-color: #2979ff; }
 .food-cloud > path {
-  stroke: #5870E8 !important;
+  stroke: #4fc3f7 !important;
   stroke-width: 1.2 !important;
   stroke-opacity: .9 !important;
   vector-effect: non-scaling-stroke !important;
@@ -28,25 +28,24 @@
 }
 ]]></style>
       <defs>
-      <linearGradient id="testagent-border" x1="0%" y1="0%" x2="100%" y2="100%">
-        <stop offset="0%" stop-color="#4fc3f7"/>
-        <stop offset="50%" stop-color="#2979ff"/>
-        <stop offset="100%" stop-color="#69f0ae"/>
-      </linearGradient>
-        <linearGradient id="body-grad" x1="12" y1="2" x2="12" y2="22" gradientUnits="userSpaceOnUse">
-        <stop offset="0" stop-color="#e8f4ff"/>
-        <stop offset="0.5" stop-color="#d4e9ff"/>
-        <stop offset="1" stop-color="#b8deff"/>
-      </linearGradient>
+        <radialGradient id="circle-fill" cx="50%" cy="40%" r="60%">
+          <stop offset="0%" stop-color="#e8f4ff"/>
+          <stop offset="100%" stop-color="#c8e0ff"/>
+        </radialGradient>
         <linearGradient id="eye-grad" x1="12" y1="3" x2="12" y2="21" gradientUnits="userSpaceOnUse">
-          <stop offset="0" stop-color="#B1A7FF"/>
-          <stop offset="0.5" stop-color="#7A9DFF"/>
-          <stop offset="1" stop-color="#3941FF"/>
+          <stop offset="0" stop-color="#69f0ae"/>
+          <stop offset="0.5" stop-color="#4fc3f7"/>
+          <stop offset="1" stop-color="#2979ff"/>
         </linearGradient>
-        <radialGradient id="hi-grad" cx="0.45" cy="0.25" r="0.55">
+        <radialGradient id="hi-grad" cx="50%" cy="35%" r="60%">
           <stop offset="0" stop-color="#ffffff" stop-opacity="0.9"/>
           <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
         </radialGradient>
+        <linearGradient id="testagent-border" x1="0%" y1="0%" x2="100%" y2="100%">
+          <stop offset="0%" stop-color="#4fc3f7"/>
+          <stop offset="50%" stop-color="#2979ff"/>
+          <stop offset="100%" stop-color="#69f0ae"/>
+        </linearGradient>
         <radialGradient id="taskA-grad" cx="0.48" cy="0.38" r="0.82">
           <stop offset="0" stop-color="#FFF7D1"/>
           <stop offset="0.58" stop-color="#FFD978"/>
@@ -68,7 +67,7 @@
           <stop offset="1" stop-color="#CE6FA6"/>
         </radialGradient>
         <filter id="cloud-drop" x="-45%" y="-45%" width="190%" height="190%">
-          <feDropShadow class="cloud-drop-shadow" dx="0" dy="0.6" stdDeviation="0.8" flood-color="#3941FF" flood-opacity="0.18"/>
+          <feDropShadow class="cloud-drop-shadow" dx="0" dy="0.6" stdDeviation="0.8" flood-color="#2979ff" flood-opacity="0.18"/>
         </filter>
         <filter id="edge-blur" x="-40%" y="-40%" width="180%" height="180%">
           <feGaussianBlur stdDeviation="0.16"/>
@@ -155,17 +154,17 @@
 
       <g id="cloudRoot">
         <g id="cloudEdge">
-          <path id="edgeContact" class="edge-contact" fill="none" stroke="#7d8aa7" stroke-width="1.05" stroke-linejoin="round" transform="translate(0 0.18)" filter="url(#edge-blur)"/>
-          <path id="edgeRimSoft" class="edge-rim-soft" fill="none" stroke="#7A9DFF" stroke-width="0.90" stroke-linejoin="round" filter="url(#edge-blur)"/>
-          <path id="edgeRimTight" class="edge-rim-tight" fill="none" stroke="#aab3c6" stroke-width="0.42" stroke-linejoin="round"/>
+          <path id="edgeContact" class="edge-contact" fill="none" stroke="#4fc3f7" stroke-width="1.05" stroke-linejoin="round" transform="translate(0 0.18)" filter="url(#edge-blur)"/>
+          <path id="edgeRimSoft" class="edge-rim-soft" fill="none" stroke="#4fc3f7" stroke-width="0.90" stroke-linejoin="round" filter="url(#edge-blur)"/>
+          <path id="edgeRimTight" class="edge-rim-tight" fill="none" stroke="#69f0ae" stroke-width="0.42" stroke-linejoin="round"/>
         </g>
         <g id="cloudGroup" filter="url(#cloud-drop)">
-          <path id="cloudPath" fill="url(#body-grad)"/>
-          <rect x="1" y="2" width="22" height="11" fill="url(#hi-grad)" clip-path="url(#cloud-clip)"/>
+          <path id="cloudPath" fill="url(#circle-fill)" stroke="url(#testagent-border)" stroke-width="1.2"/>
+          <circle cx="12" cy="7" r="7" fill="url(#hi-grad)" clip-path="url(#cloud-clip)"/>
         </g>
         <g id="eyeGroup">
-          <rect id="eyeL" x="7.7" y="9.5" width="2.6" height="5" rx="1.3" ry="1.3" fill="#2979ff" />
-          <rect id="eyeR" x="13.7" y="9.5" width="2.6" height="5" rx="1.3" ry="1.3" fill="#2979ff" />
+          <ellipse id="eyeL" cx="9" cy="9.78" rx="1.22" ry="1.97" fill="url(#eye-grad)" stroke="#ffffff" stroke-width="0.08" stroke-opacity="0.7"/>
+          <ellipse id="eyeR" cx="15" cy="9.78" rx="1.22" ry="1.97" fill="url(#eye-grad)" stroke="#ffffff" stroke-width="0.08" stroke-opacity="0.7"/>
         </g>
       </g>
 
@@ -180,7 +179,7 @@
 </g>
 
 <script type="application/ecmascript"><![CDATA[
-const CLOUD_D = "M 12 2 A 10 10 0 1 1 12 22 A 10 10 0 1 1 12 2 Z";
+const CLOUD_D = "M 12 3 A 9 9 0 1 1 12 21 A 9 9 0 1 1 12 3 Z";
 
 const CENTER = { x: 12, y: 12 };
 
@@ -254,7 +253,7 @@ const P = {
   syncMorph: 0.16,
   morphAmt: 0.04,
   morphPeriod: 5.0,
-  cloudR: 7.5,
+  cloudR: 9,
   eyeShift: 1.10,
   eyeSwitchT: 1.15,
   saccade: 0.13,
@@ -271,8 +270,8 @@ const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const smoothstep = t => t * t * (3 - 2 * t);
 
 const EYE_BASE = {
-  l: { cx: 8, cy: 11.83, rx: 1.3, ry: 2.5 },
-  r: { cx: 16, cy: 11.83, rx: 1.3, ry: 2.5 }
+  l: { cx: 9, cy: 9.78, rx: 1.22, ry: 1.97 },
+  r: { cx: 15, cy: 9.78, rx: 1.22, ry: 1.97 }
 };
 
 const TASK_ORDER = ['A', 'B', 'C', 'D'];
@@ -476,10 +475,8 @@ function getBlinkScale(t) {
 }
 
 function applyBlink(ellipse, base, scale) {
-  const newRy = Math.max(base.ry * scale, 0.15);
-  const newCy = base.cy + (base.ry - newRy) / 2;
-  ellipse.setAttribute('ry', newRy.toFixed(3));
-  ellipse.setAttribute('cy', newCy.toFixed(3));
+  const ry = Math.max(base.ry * scale, 0.08);
+  ellipse.setAttribute('ry', ry.toFixed(3));
 }
 
 function getTargetPoint(key, states) {
