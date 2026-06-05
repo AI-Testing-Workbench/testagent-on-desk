@@ -48,9 +48,9 @@ const DOZE = {
   bodyTy: 1.15,
   bodyRot: -1.5,
   bodyScale: 1.04,
-  eyeY: 13.0,
-  eyeGap: 6.12,
-  eyeW: 2.70,
+  eyeY: 10.78,
+  eyeGap: 6.66,
+  eyeW: 2.72,
   eyeH: 1.28,
   eyeTilt: 7.7,
   eyeStroke: 0.80,
@@ -210,15 +210,14 @@ function makeDozeCloudPath(amount) {
 
 function defs(cloudD) {
   return `
-    <linearGradient id="body-grad" x1="12" y1="2" x2="12" y2="22" gradientUnits="userSpaceOnUse">
-        <stop offset="0" stop-color="#e8f4ff"/>
-        <stop offset="0.5" stop-color="#d4e9ff"/>
-        <stop offset="1" stop-color="#b8deff"/>
-      </linearGradient>
+    <radialGradient id="body-grad" cx="50%" cy="40%" r="60%">
+        <stop offset="0%" stop-color="#e8f4ff"/>
+        <stop offset="100%" stop-color="#c8e0ff"/>
+      </radialGradient>
     <linearGradient id="eye-grad" x1="12" y1="8" x2="12" y2="15" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#B1A7FF"/>
-      <stop offset="0.55" stop-color="#7A9DFF"/>
-      <stop offset="1" stop-color="#3941FF"/>
+      <stop offset="0" stop-color="#69f0ae"/>
+      <stop offset="0.55" stop-color="#4fc3f7"/>
+      <stop offset="1" stop-color="#2979ff"/>
     </linearGradient>
     <radialGradient id="hi-grad" cx="0.43" cy="0.22" r="0.62">
       <stop offset="0" stop-color="#ffffff" stop-opacity="0.82"/>
@@ -226,57 +225,18 @@ function defs(cloudD) {
       <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
     </radialGradient>
     <radialGradient id="halo-grad" cx="50%" cy="50%" r="50%">
-      <stop offset="0" stop-color="#7A9DFF" stop-opacity="0.55"/>
-      <stop offset="0.54" stop-color="#3941FF" stop-opacity="0.24"/>
-      <stop offset="1" stop-color="#3941FF" stop-opacity="0"/>
+      <stop offset="0" stop-color="#4fc3f7" stop-opacity="0.55"/>
+      <stop offset="0.54" stop-color="#2979ff" stop-opacity="0.24"/>
+      <stop offset="1" stop-color="#2979ff" stop-opacity="0"/>
     </radialGradient>
     <filter id="drop" x="-45%" y="-45%" width="190%" height="190%">
-      <feDropShadow dx="0" dy="0.72" stdDeviation="0.92" flood-color="#3941FF" flood-opacity="0.18"/>
-    </filter>
-    <filter id="edge-blur" x="-40%" y="-40%" width="180%" height="180%">
-      <feGaussianBlur stdDeviation="0.16"/>
+      <feDropShadow dx="0" dy="0.72" stdDeviation="0.92" flood-color="#2979ff" flood-opacity="0.18"/>
     </filter>
     <filter id="halo-blur" x="-80%" y="-120%" width="260%" height="340%">
       <feGaussianBlur stdDeviation="0.42"/>
     </filter>
     <clipPath id="cloud-clip"><path d="${cloudD}"/></clipPath>
   `;
-}
-
-function capsulePath(cx, cy, w, h) {
-  const r = w / 2;
-  const top = cy - h / 2;
-  const bottom = cy + h / 2;
-  return [
-    `M ${cx.toFixed(2)} ${top.toFixed(2)}`,
-    `C ${(cx + r).toFixed(2)} ${top.toFixed(2)} ${(cx + r).toFixed(2)} ${(top + r).toFixed(2)} ${(cx + r).toFixed(2)} ${(top + r).toFixed(2)}`,
-    `L ${(cx + r).toFixed(2)} ${(bottom - r).toFixed(2)}`,
-    `C ${(cx + r).toFixed(2)} ${bottom.toFixed(2)} ${cx.toFixed(2)} ${bottom.toFixed(2)} ${cx.toFixed(2)} ${bottom.toFixed(2)}`,
-    `C ${(cx - r).toFixed(2)} ${bottom.toFixed(2)} ${(cx - r).toFixed(2)} ${(bottom - r).toFixed(2)} ${(cx - r).toFixed(2)} ${(bottom - r).toFixed(2)}`,
-    `L ${(cx - r).toFixed(2)} ${(top + r).toFixed(2)}`,
-    `C ${(cx - r).toFixed(2)} ${top.toFixed(2)} ${cx.toFixed(2)} ${top.toFixed(2)} ${cx.toFixed(2)} ${top.toFixed(2)} Z`
-  ].join(' ');
-}
-
-function roundedRectPath(cx, cy, w, h) {
-  const r = Math.min(w, h) / 2;
-  const k = 0.5522847498;
-  const left = cx - w / 2;
-  const right = cx + w / 2;
-  const top = cy - h / 2;
-  const bottom = cy + h / 2;
-  const c = r * k;
-  return [
-    `M ${(left + r).toFixed(2)} ${top.toFixed(2)}`,
-    `L ${(right - r).toFixed(2)} ${top.toFixed(2)}`,
-    `C ${(right - r + c).toFixed(2)} ${top.toFixed(2)} ${right.toFixed(2)} ${(top + r - c).toFixed(2)} ${right.toFixed(2)} ${(top + r).toFixed(2)}`,
-    `L ${right.toFixed(2)} ${(bottom - r).toFixed(2)}`,
-    `C ${right.toFixed(2)} ${(bottom - r + c).toFixed(2)} ${(right - r + c).toFixed(2)} ${bottom.toFixed(2)} ${(right - r).toFixed(2)} ${bottom.toFixed(2)}`,
-    `L ${(left + r).toFixed(2)} ${bottom.toFixed(2)}`,
-    `C ${(left + r - c).toFixed(2)} ${bottom.toFixed(2)} ${left.toFixed(2)} ${(bottom - r + c).toFixed(2)} ${left.toFixed(2)} ${(bottom - r).toFixed(2)}`,
-    `L ${left.toFixed(2)} ${(top + r).toFixed(2)}`,
-    `C ${left.toFixed(2)} ${(top + r - c).toFixed(2)} ${(left + r - c).toFixed(2)} ${top.toFixed(2)} ${(left + r).toFixed(2)} ${top.toFixed(2)} Z`
-  ].join(' ');
 }
 
 function closedEyeStrokePath(cx, cy, w, h, tiltDeg, flip) {
@@ -289,23 +249,24 @@ function closedEyeStrokePath(cx, cy, w, h, tiltDeg, flip) {
   return `M ${x1.toFixed(2)} ${(cy - tilt).toFixed(2)} C ${c1x.toFixed(2)} ${mid.toFixed(2)} ${c2x.toFixed(2)} ${mid.toFixed(2)} ${x2.toFixed(2)} ${(cy + tilt).toFixed(2)}`;
 }
 
-function makeClippedCapsuleEye(cx, cy, w, h, lid, clipId) {
-  const d = capsulePath(cx, cy, w, h);
+function makeEllipseEye(cx, cy, w, h, lid, clipId) {
+  const rx = w / 2;
+  const ry = h / 2;
   const cut = clamp01(lid);
-  if (cut <= 0.012) return `<path d="${d}"/>`;
+  if (cut <= 0.012) return `<ellipse cx="${cx.toFixed(2)}" cy="${cy.toFixed(2)}" rx="${rx.toFixed(2)}" ry="${ry.toFixed(2)}"/>`;
 
-  const cutY = cy - h / 2 + h * cut;
+  const cutY = cy - ry + h * cut;
   return `
         <clipPath id="${clipId}" clipPathUnits="userSpaceOnUse">
-          <rect x="${(cx - w / 2 - 0.18).toFixed(2)}" y="${cutY.toFixed(2)}" width="${(w + 0.36).toFixed(2)}" height="${(h + 0.48).toFixed(2)}"/>
+          <rect x="${(cx - rx - 0.18).toFixed(2)}" y="${cutY.toFixed(2)}" width="${(w + 0.36).toFixed(2)}" height="${(h + 0.48).toFixed(2)}"/>
         </clipPath>
-        <path d="${d}" clip-path="url(#${clipId})"/>`;
+        <ellipse cx="${cx.toFixed(2)}" cy="${cy.toFixed(2)}" rx="${rx.toFixed(2)}" ry="${ry.toFixed(2)}" clip-path="url(#${clipId})"/>`;
 }
 
 function makeClosingSlitEye(cx, cy, w, h, close, clipId) {
   const u = clamp01(close);
   const squeeze = smoothstep(0.42, 0.84, u);
-  if (squeeze <= 0.001) return makeClippedCapsuleEye(cx, cy, w, h, u * 0.96, clipId);
+  if (squeeze <= 0.001) return makeEllipseEye(cx, cy, w, h, u * 0.96, clipId);
 
   const cutY = cy - h / 2 + h * u * 0.96;
   const bottomY = cy + h / 2;
@@ -314,19 +275,19 @@ function makeClosingSlitEye(cx, cy, w, h, close, clipId) {
   const slitH = lerp(visibleH, 0.34, squeeze);
   const slitW = lerp(w, w * 0.90, squeeze);
   const slitCy = lerp(visibleCy, cy + 0.25, squeeze);
-  return `<path d="${roundedRectPath(cx, slitCy, slitW, slitH)}"/>`;
+  return `<ellipse cx="${cx.toFixed(2)}" cy="${slitCy.toFixed(2)}" rx="${(slitW / 2).toFixed(2)}" ry="${(slitH / 2).toFixed(2)}"/>`;
 }
 
 function makeEyes(eye) {
-  const fillGap = 6.00;
-  const fillCy = 12.00;
-  const fillW = 2.60;
-  const fillH = 5.00;
+  const fillGap = 6.66;
+  const fillCy = 9.78;
+  const fillW = 2.72;
+  const fillH = 4.36;
   const fillLeft = 12 - fillGap / 2;
   const fillRight = 12 + fillGap / 2;
 
-  const closedGap = lerp(5.84, DOZE.eyeGap, eye.drop);
-  const closedCy = lerp(12.12, DOZE.eyeY, eye.drop);
+  const closedGap = lerp(6.66, DOZE.eyeGap, eye.drop);
+  const closedCy = lerp(9.78, DOZE.eyeY, eye.drop);
   const closedW = lerp(2.28, DOZE.eyeW, eye.drop);
   const closedH = lerp(0.72, DOZE.eyeH, eye.drop);
   const closedTilt = lerp(2.8, DOZE.eyeTilt, eye.drop);
@@ -339,10 +300,10 @@ function makeEyes(eye) {
       <g fill="#2979ff"  opacity="${eye.fillOpacity.toFixed(3)}">
         ${eye.finalClose > 0.001
           ? makeClosingSlitEye(fillLeft, fillCy, fillW, fillH, eye.finalClose, 'eye-l-clip')
-          : makeClippedCapsuleEye(fillLeft, fillCy, fillW, fillH, eye.lid, 'eye-l-clip')}
+          : makeEllipseEye(fillLeft, fillCy, fillW, fillH, eye.lid, 'eye-l-clip')}
         ${eye.finalClose > 0.001
           ? makeClosingSlitEye(fillRight, fillCy, fillW, fillH, eye.finalClose, 'eye-r-clip')
-          : makeClippedCapsuleEye(fillRight, fillCy, fillW, fillH, eye.lid, 'eye-r-clip')}
+          : makeEllipseEye(fillRight, fillCy, fillW, fillH, eye.lid, 'eye-r-clip')}
       </g>
       <g id="eyes-doze" fill="none" stroke="url(#eye-grad)" stroke-width="${closedStroke.toFixed(2)}" stroke-linecap="round" stroke-linejoin="round" opacity="${(eye.closedOpacity * DOZE.eyeOpacity).toFixed(3)}">
         <path d="${closedEyeStrokePath(closedLeft, closedCy, closedW, closedH, closedTilt, -1)}"/>
@@ -417,9 +378,6 @@ function renderFrame(t) {
   const bodyTransform = `translate(${f.bodyTx.toFixed(3)} ${f.bodyTy.toFixed(3)}) translate(12 12) rotate(${f.bodyRot.toFixed(3)}) scale(${f.bodySx.toFixed(4)} ${f.bodySy.toFixed(4)}) translate(-12 -12)`;
   stage.innerHTML = `
 <style>
-.edge-rim-tight { stroke-opacity: .08; }
-.edge-rim-soft  { stroke-opacity: .06; }
-.edge-contact   { stroke-opacity: .08; }
 .page {
   width: min(1040px, 100%);
   display: grid;
@@ -499,9 +457,6 @@ function renderFrame(t) {
   text-align: right;
 }
 @media (prefers-color-scheme: light) {
-.edge-rim-tight { stroke-opacity: .15; }
-.edge-rim-soft  { stroke-opacity: .10; }
-.edge-contact   { stroke-opacity: .18; }
 .cloud-drop-shadow { flood-opacity: .13; }
 .timeline, .tuning {
   background: rgba(255, 255, 255, .68);
@@ -530,13 +485,12 @@ function renderFrame(t) {
       </defs>
       <g id="halo-layer" opacity="${f.haloU.toFixed(3)}">
         <ellipse cx="12" cy="${DOZE.haloY}" rx="${lerp(7.8, DOZE.haloRx, f.haloU).toFixed(2)}" ry="${lerp(.72, DOZE.haloRy, f.haloU).toFixed(2)}" fill="url(#halo-grad)" opacity="${DOZE.haloOpacity}" filter="url(#halo-blur)"/>
-        <ellipse cx="12" cy="${(DOZE.haloY + 0.05).toFixed(2)}" rx="${(DOZE.haloRx * 0.68).toFixed(2)}" ry="${(DOZE.haloRy * 0.46).toFixed(2)}" fill="#7A9DFF" opacity="${DOZE.glowOpacity}" filter="url(#halo-blur)"/>
+        <ellipse cx="12" cy="${(DOZE.haloY + 0.05).toFixed(2)}" rx="${(DOZE.haloRx * 0.68).toFixed(2)}" ry="${(DOZE.haloRy * 0.46).toFixed(2)}" fill="#4fc3f7" opacity="${DOZE.glowOpacity}" filter="url(#halo-blur)"/>
       </g>
       <g id="body-pose" transform="${bodyTransform}">
-        <!-- edge-system removed for clean testagent style -->
         <g filter="url(#drop)">
-          <use href="#cloud-shape" fill="url(#body-grad)"/>
-          <rect x="1" y="2.2" width="22" height="10.4" fill="url(#hi-grad)" clip-path="url(#cloud-clip)" opacity=".88"/>
+          <use href="#cloud-shape" fill="url(#body-grad)" stroke="url(#testagent-border)" stroke-width="1.2"/>
+          <circle cx="12" cy="7" r="7" fill="url(#hi-grad)" clip-path="url(#cloud-clip)" opacity=".88"/>
         </g>
         ${makeEyes(f.eye)}
       </g>
