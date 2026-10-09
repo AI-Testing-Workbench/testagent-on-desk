@@ -1,5 +1,10 @@
 "use strict";
 
+const {
+  buildLatestLocalCodexProcessIds,
+  isSupersededLocalCodexProcessSession,
+} = require("./state-session-dedupe");
+
 const SLEEP_SEQUENCE_STATES = ["yawning", "dozing", "collapsing", "sleeping", "waking"];
 
 const STATE_PRIORITY = Object.freeze({
@@ -12,6 +17,7 @@ const STATE_PRIORITY = Object.freeze({
   working: 3,
   thinking: 2,
   idle: 1,
+  roam: 1,
   sleeping: 0,
 });
 
@@ -44,10 +50,12 @@ function resolveDominantSessionState(sessions, options = {}) {
   let best = "sleeping";
   let hasSession = false;
   let hasNonHeadless = false;
+  const latestLocalCodexProcessIds = buildLatestLocalCodexProcessIds(sessions);
 
-  for (const [, session] of normalizeSessionsIterable(sessions)) {
+  for (const [id, session] of normalizeSessionsIterable(sessions)) {
     hasSession = true;
     if (session && session.headless) continue;
+    if (isSupersededLocalCodexProcessSession(id, session, latestLocalCodexProcessIds)) continue;
     hasNonHeadless = true;
     const state = session && session.state;
     if (getStatePriority(state, statePriority) > getStatePriority(best, statePriority)) best = state;
@@ -60,6 +68,10 @@ function resolveDominantSessionState(sessions, options = {}) {
 function resolveDisplayStateFromSessions(sessions, options = {}) {
   const statePriority = options.statePriority || STATE_PRIORITY;
   let best = resolveDominantSessionState(sessions, { statePriority });
+
+  if (options.compacting === true && getStatePriority(best, statePriority) < getStatePriority("thinking", statePriority)) {
+    best = "sweeping";
+  }
 
   if (options.permissionLocked === true) {
     best = "notification";

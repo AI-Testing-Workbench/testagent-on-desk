@@ -1,4 +1,4 @@
-const { contextBridge, ipcRenderer } = require("electron");
+const { contextBridge, ipcRenderer, webUtils } = require("electron");
 
 // Parse hit-renderer theme config from additionalArguments (synchronous, available on first load)
 const hitThemeArg = process.argv.find(a => a.startsWith("--hit-theme-config="));
@@ -24,6 +24,15 @@ contextBridge.exposeInMainWorld("hitAPI", {
   dragEnd: () => ipcRenderer.send("drag-end"),
   showContextMenu: () => ipcRenderer.send("show-context-menu"),
   focusTerminal: () => ipcRenderer.send("focus-terminal"),
+  // OS file drop (#459). File → absolute path must resolve here in the
+  // preload: Electron ≥32 removed File.path from the renderer, and
+  // webUtils.getPathForFile only accepts a File passed across the bridge.
+  // Returns "" for non-filesystem Files (e.g. images dragged from a browser).
+  getPathForFile: (file) => {
+    try { return webUtils.getPathForFile(file) || ""; } catch (_) { return ""; }
+  },
+  dropPaths: (paths) => ipcRenderer.send("pet-drop-paths", paths),
+  onDropAccepted: (cb) => ipcRenderer.on("pet-drop-accepted", () => cb()),
   exitMiniMode: () => ipcRenderer.send("exit-mini-mode"),
   showDashboard: () => ipcRenderer.send("show-dashboard"),
   revealSessionHud: () => ipcRenderer.send("pet-interaction:reveal-session-hud"),
@@ -34,4 +43,7 @@ contextBridge.exposeInMainWorld("hitAPI", {
   // State sync ← main
   onStateSync: (cb) => ipcRenderer.on("hit-state-sync", (_, data) => cb(data)),
   onCancelReaction: (cb) => ipcRenderer.on("hit-cancel-reaction", () => cb()),
+  // Main released a drag lock from a user-invoked recovery action; drop any
+  // local capture so the next gesture starts clean.
+  onForceDragRelease: (cb) => ipcRenderer.on("force-drag-release", () => cb()),
 });

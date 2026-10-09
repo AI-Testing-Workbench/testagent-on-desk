@@ -4,6 +4,7 @@
 // primitives the migration test card and approval surface need:
 //
 //   getMe / sendMessage / getUpdates / answerCallbackQuery / editMessageReplyMarkup
+//   / editMessageText
 //
 // + offset progression on getUpdates and AbortController-driven cancellation.
 //
@@ -35,6 +36,13 @@ const ERROR_CLASSES = Object.freeze({
   TOKEN_MISSING: "token_missing",
   UNKNOWN: "unknown",
 });
+
+function throwIfAborted(signal) {
+  if (!signal || signal.aborted !== true) return;
+  const err = new Error("aborted");
+  err.name = "AbortError";
+  throw err;
+}
 
 function classifyError(err) {
   if (!err) return ERROR_CLASSES.UNKNOWN;
@@ -74,6 +82,16 @@ function classifyError(err) {
     return ERROR_CLASSES.NETWORK;
   }
   const message = String(err.message || "");
+  // Electron/Chromium net stack surfaces failures as "net::ERR_*" in the message
+  // with no Node-style err.code (issue #359). Allowlist the connection/proxy/DNS/
+  // transport failures as retryable NETWORK — NOT a catch-all, so ERR_CERT_* /
+  // ERR_BLOCKED_BY_* still fall through to UNKNOWN. ERR_ABORTED maps to NETWORK,
+  // not TIMEOUT: the poll loop treats TIMEOUT as user-stop and exits, while a
+  // genuine user abort is already handled above (err.name === "AbortError").
+  // PROXY_CONNECTION_FAILED is narrowed so proxy cert/auth errors aren't mislabeled.
+  if (/net::ERR_(PROXY_CONNECTION_FAILED|TUNNEL_|SOCKS_|CONNECTION_|NAME_NOT_RESOLVED|TIMED_OUT|NETWORK_CHANGED|INTERNET_DISCONNECTED|ADDRESS_UNREACHABLE|EMPTY_RESPONSE|ABORTED)/i.test(message)) {
+    return ERROR_CLASSES.NETWORK;
+  }
   if (/fetch failed|network|socket|timeout/i.test(message)) return ERROR_CLASSES.NETWORK;
   return ERROR_CLASSES.UNKNOWN;
 }
@@ -90,6 +108,7 @@ class TelegramNativeClient {
     this.transport = transport;
     this.logger = logger;
     this._offset = 0;
+    this._offsetGeneration = 0;
   }
 
   get offset() {
@@ -98,6 +117,7 @@ class TelegramNativeClient {
 
   resetOffset() {
     this._offset = 0;
+    this._offsetGeneration += 1;
   }
 
   async _call(method, payload = {}, { signal } = {}) {
@@ -107,7 +127,12 @@ class TelegramNativeClient {
     // call); the per-call API surface stays free of raw secrets so that any
     // future logging / debug serialization of {method, payload, signal}
     // cannot accidentally leak the token.
+    throwIfAborted(signal);
     const hasToken = await this.tokenStore.hasToken();
+    // Token lookup may touch disk. A route stop/reset that happens while it is
+    // pending must prevent the old request from crossing the transport boundary
+    // with the replacement bot credential.
+    throwIfAborted(signal);
     if (!hasToken) {
       throw new TelegramApiError({
         status: null,
@@ -143,15 +168,22 @@ class TelegramNativeClient {
     return this._call("editMessageReplyMarkup", payload, opts);
   }
 
+  editMessageText(payload, opts) {
+    return this._call("editMessageText", payload, opts);
+  }
+
   // long-poll one batch. Caller is responsible for looping; this method only
   // ever issues one HTTP call so tests stay deterministic.
   async getUpdates({ timeout = 25, signal } = {}) {
+    const offsetGeneration = this._offsetGeneration;
     const updates = await this._call(
       "getUpdates",
       { offset: this._offset, timeout },
       { signal },
     );
-    if (Array.isArray(updates) && updates.length > 0) {
+    if (!(signal && signal.aborted)
+      && offsetGeneration === this._offsetGeneration
+      && Array.isArray(updates) && updates.length > 0) {
       const lastId = updates[updates.length - 1].update_id;
       if (Number.isInteger(lastId)) {
         this._offset = Math.max(this._offset, lastId + 1);
@@ -161,9 +193,8 @@ class TelegramNativeClient {
   }
 }
 
-// Plan §116: when starting the native poller right after stopping the sidecar
-// (or starting fresh while another consumer is still releasing its long-poll
-// session), Telegram returns 409 Conflict. Retry with exponential backoff:
+// When starting while another consumer is still releasing its long-poll
+// session, Telegram returns 409 Conflict. Retry with exponential backoff:
 // 1s start, ×2, capped at 5s, total deadline 35s. While in conflict we MUST
 // NOT persist transport=native — that is the caller's responsibility; this
 // helper only governs the retry loop itself.

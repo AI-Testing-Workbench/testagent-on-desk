@@ -1,36 +1,40 @@
 "use strict";
 
-// Main-process controller that bolts the migration reducer + owner-manager
-// onto Clawd's existing sidecar lifecycle. The renderer never talks to the
-// reducer directly — it goes through this controller via IPC commands, so the
-// state machine has a single source of truth.
+// Native-only Telegram migration controller. Historical legacy prefs can route
+// a user to NATIVE_MIGRATION_REQUIRED, but this controller has no sidecar
+// dependency, sidecar owner, or fallback path.
 
 const {
   STATES,
   EVENTS,
+  SIDE_EFFECTS,
+  ERROR_CODES,
+  TEST_ORIGINS,
   applyEvent,
   computeInitial,
-  defaultPrefs,
 } = require("./telegram-migration-state");
-const { TelegramOwnerManager } = require("./telegram-owner-manager");
+const { ERROR_CLASSES } = require("./telegram-native-client");
+const {
+  ALLOWED_TEST_ERROR_CLASSES,
+  sanitizeErrorClass,
+  normalizeTelegramVerificationFailure,
+} = require("./telegram-verification-failure");
 
 function createTelegramMigrationController({
-  sidecar,
   native,
   readPrefs,
   writePrefs,
   readFiles,
-  settleMs,
-  stopGraceMs,
   log = () => {},
   setTimer = setTimeout,
   clearTimer = clearTimeout,
   testTimeoutMs = 60000,
+  now = Date.now,
+  onSnapshotChanged = () => {},
 }) {
-  if (!sidecar || typeof sidecar.isRunning !== "function") {
-    throw new TypeError("migration-controller: sidecar handle required");
-  }
-  if (!native || typeof native.isPolling !== "function") {
+  if (!native || typeof native.isPolling !== "function"
+    || typeof native.start !== "function" || typeof native.stop !== "function"
+    || typeof native.sendTestCard !== "function") {
     throw new TypeError("migration-controller: native handle required");
   }
   if (typeof readPrefs !== "function" || typeof writePrefs !== "function") {
@@ -41,34 +45,28 @@ function createTelegramMigrationController({
   }
 
   let state = STATES.IDLE;
-  let prefs = defaultPrefs();
-  let runtimeStatus = { transport: "off", status: "stopped", reason: null };
+  let prefs = {};
+  let testOrigin = null;
   let pendingTestTimer = null;
   let lastError = null;
+  let lastTestResult = null;
+  let diagnosticCode = null;
+  let revision = 0;
+  let dispatchQueue = Promise.resolve();
 
-  const manager = new TelegramOwnerManager({
-    sidecar,
-    native,
-    settleMs,
-    stopGraceMs,
-    onPersist: async (patch) => {
-      prefs = { ...prefs, ...patch };
-      await writePrefs(patch);
-    },
-    onRuntimeStatus: (s) => {
-      runtimeStatus = { ...runtimeStatus, ...s };
-    },
-    logger: { warn: (msg) => log("warn", String(msg)) },
-  });
+  function safeLog(level, message, meta) {
+    try {
+      const pending = log(level, message, meta);
+      if (pending && typeof pending.then === "function") {
+        void Promise.resolve(pending).catch(() => {});
+      }
+    } catch {}
+  }
 
   function readPrefsNow() {
-    // Important: do NOT fill `transport` with defaultPrefs()'s "off". The
-    // reducer treats an explicit "off" as "user has disabled remote approval",
-    // which is a different signal from "v0.8 user upgrading and we have no
-    // pref yet". Only carry the field through when the caller actually set it.
     const raw = readPrefs() || {};
     prefs = {
-      nativeVerifiedAt: typeof raw.nativeVerifiedAt === "number" ? raw.nativeVerifiedAt : null,
+      nativeVerifiedAt: Number.isFinite(raw.nativeVerifiedAt) ? raw.nativeVerifiedAt : null,
       legacyEnabled: typeof raw.legacyEnabled === "boolean" ? raw.legacyEnabled : null,
       migration: raw.migration && typeof raw.migration === "object"
         ? raw.migration
@@ -95,96 +93,312 @@ function createTelegramMigrationController({
     clearTestTimer();
     pendingTestTimer = setTimer(() => {
       pendingTestTimer = null;
-      dispatch({ type: EVENTS.TEST_TIMEOUT }).catch(() => {});
+      void dispatch({ type: EVENTS.TEST_TIMEOUT });
     }, testTimeoutMs);
     if (pendingTestTimer && typeof pendingTestTimer.unref === "function") {
       pendingTestTimer.unref();
     }
   }
 
-  async function dispatch(event) {
-    readPrefsNow();
-    const files = readFilesNow();
-    const result = applyEvent({ state, prefs, files }, event);
-
-    if (result.errorCode) {
-      lastError = { code: result.errorCode, eventType: event && event.type };
-      log("warn", `migration dispatch ${event && event.type} rejected`, {
-        code: result.errorCode,
-      });
-      return { ok: false, errorCode: result.errorCode, state };
-    }
-
-    try {
-      await manager.apply(result.sideEffects || []);
-    } catch (err) {
-      lastError = { code: err && err.code ? err.code : "APPLY_FAILED", message: err && err.message };
-      log("warn", "migration apply failed", { error: err && err.message });
-
-      if (event && event.type === EVENTS.USER_ROLLBACK_TO_LEGACY && result.state === STATES.SWITCHING_TO_LEGACY) {
-        state = STATES.SWITCHING_TO_LEGACY;
-        const failed = applyEvent(
-          { state, prefs, files: readFilesNow() },
-          { type: EVENTS.SIDECAR_START_FAILED, reason: lastError.code },
-        );
-        try {
-          await manager.apply(failed.sideEffects || []);
-          state = failed.state;
-          clearTestTimer();
-        } catch (fallbackErr) {
-          lastError = {
-            code: fallbackErr && fallbackErr.code ? fallbackErr.code : "APPLY_FAILED",
-            message: fallbackErr && fallbackErr.message,
-          };
-          state = result.state;
-        }
-      }
-      // Best-effort recover: re-read the world so state mirrors reality.
-      return { ok: false, errorCode: lastError.code, message: lastError.message, state };
-    }
-
-    state = result.state;
-    lastError = null;
-
-    // Arm/clear the 60s test timer alongside state transitions (per plan §148
-    // the Telegram tap deadline is owned by the driver, not the reducer).
-    if (state === STATES.TESTING_NATIVE) armTestTimer();
-    else clearTestTimer();
-
-    if (event && event.type === EVENTS.USER_ROLLBACK_TO_LEGACY && state === STATES.SWITCHING_TO_LEGACY) {
-      return dispatch({ type: EVENTS.SIDECAR_STARTED });
-    }
-
-    return { ok: true, state };
+  function snapshotWithoutRevision() {
+    return {
+      state,
+      transport: Object.prototype.hasOwnProperty.call(prefs, "transport")
+        ? prefs.transport
+        : undefined,
+      nativeVerifiedAt: prefs.nativeVerifiedAt || null,
+      testOrigin,
+      lastError,
+      lastTestResult,
+      diagnosticCode,
+      ownerSnapshot: {
+        nativePolling: native.isPolling() === true,
+      },
+    };
   }
 
-  async function init() {
-    readPrefsNow();
-    const files = readFilesNow();
-    const result = computeInitial({ prefs, files });
+  function emitSnapshotChanged() {
+    revision += 1;
     try {
-      await manager.apply(result.sideEffects || []);
+      onSnapshotChanged({ revision, snapshot: getSnapshot() });
     } catch (err) {
-      log("warn", "migration init apply failed", { error: err && err.message });
+      safeLog("warn", "migration snapshot notifier failed", {
+        error: err && err.message ? err.message : String(err),
+      });
     }
-    state = result.state;
-    return state;
   }
 
   function getSnapshot() {
     return {
-      state,
-      transport: prefs.transport,
-      nativeVerifiedAt: prefs.nativeVerifiedAt,
-      legacyEnabled: prefs.legacyEnabled,
-      runtimeStatus,
-      ownerSnapshot: manager.snapshot(),
-      migrationInfo: prefs.migration || { importedAt: null, importError: null },
-      lastError,
+      ...snapshotWithoutRevision(),
+      revision,
     };
   }
 
-  return { init, dispatch, getSnapshot, _manager: manager };
+  async function persistPatch(patch) {
+    await writePrefs(patch);
+    prefs = { ...prefs, ...patch };
+  }
+
+  async function stopNativeBestEffort() {
+    try {
+      await native.stop();
+    } catch (err) {
+      safeLog("warn", "native stop failed", {
+        error: err && err.message ? err.message : String(err),
+      });
+    }
+  }
+
+  async function applyEffects(sideEffects) {
+    for (const entry of Array.isArray(sideEffects) ? sideEffects : []) {
+      if (!entry) continue;
+      if (entry.type === SIDE_EFFECTS.START_NATIVE_POLLER) {
+        await native.start();
+      } else if (entry.type === SIDE_EFFECTS.STOP_NATIVE_POLLER) {
+        await stopNativeBestEffort();
+      } else if (entry.type === SIDE_EFFECTS.SEND_TEST_CARD) {
+        await native.sendTestCard(entry.payload);
+      } else if (entry.type === SIDE_EFFECTS.PERSIST_PREFS) {
+        await persistPatch(entry.payload || {});
+      } else {
+        const err = new Error(`Unknown Telegram migration side effect: ${entry.type}`);
+        err.code = "UNKNOWN_SIDE_EFFECT";
+        throw err;
+      }
+    }
+  }
+
+  function targetForOrigin(origin) {
+    return origin === TEST_ORIGINS.IDLE
+      ? STATES.IDLE
+      : STATES.NATIVE_MIGRATION_REQUIRED;
+  }
+
+  function recordFailure(outcome, errorClass) {
+    const at = Number(now());
+    if (outcome === "timeout") {
+      lastTestResult = { outcome: "timeout", at };
+    } else {
+      lastTestResult = {
+        outcome,
+        errorClass: sanitizeErrorClass(errorClass),
+        at,
+      };
+    }
+    const failure = normalizeTelegramVerificationFailure(lastTestResult);
+    safeLog("warn", "native Telegram verification failed", {
+      outcome: failure ? failure.outcome : "failed",
+      errorClass: failure ? failure.errorCode : ERROR_CLASSES.UNKNOWN,
+    });
+  }
+
+  async function recoverTestApplyFailure(err, origin) {
+    await stopNativeBestEffort();
+    clearTestTimer();
+    state = targetForOrigin(origin);
+    testOrigin = origin;
+    lastError = {
+      code: err && err.code ? String(err.code).slice(0, 64) : "APPLY_FAILED",
+      eventType: EVENTS.USER_TEST_NATIVE,
+    };
+    recordFailure("native-start-failed", sanitizeErrorClass(
+      err && err.errorClass,
+      err && err.code === "TOKEN_MISSING" ? ERROR_CLASSES.TOKEN_MISSING : "apply-failed",
+    ));
+    emitSnapshotChanged();
+  }
+
+  function isLateTerminal(event) {
+    return event
+      && [EVENTS.TEST_SUCCESS, EVENTS.TEST_FAILED, EVENTS.TEST_TIMEOUT].includes(event.type)
+      && state !== STATES.TESTING_NATIVE;
+  }
+
+  async function dispatchNow(event) {
+    if (isLateTerminal(event)) {
+      return { ok: false, errorCode: ERROR_CODES.ILLEGAL_TRANSITION, state };
+    }
+
+    readPrefsNow();
+    const files = readFilesNow();
+    const reduced = applyEvent({ state, prefs, files, testOrigin }, event);
+
+    if (reduced.errorCode) {
+      if (reduced.errorCode === ERROR_CODES.CONFIG_INCOMPLETE) {
+        state = STATES.NEEDS_SETUP;
+      }
+      lastError = {
+        code: reduced.errorCode,
+        eventType: event && event.type,
+      };
+      emitSnapshotChanged();
+      return { ok: false, errorCode: reduced.errorCode, state };
+    }
+
+    const nextOrigin = reduced.testOrigin || testOrigin;
+    try {
+      await applyEffects(reduced.sideEffects);
+    } catch (err) {
+      if (event && (event.type === EVENTS.USER_TEST_NATIVE || event.type === EVENTS.TEST_SUCCESS)) {
+        await recoverTestApplyFailure(err, nextOrigin || TEST_ORIGINS.IDLE);
+        return {
+          ok: false,
+          errorCode: lastError && lastError.code,
+          state,
+        };
+      }
+      lastError = {
+        code: err && err.code ? String(err.code).slice(0, 64) : "APPLY_FAILED",
+        eventType: event && event.type,
+      };
+      emitSnapshotChanged();
+      return { ok: false, errorCode: lastError.code, state };
+    }
+
+    state = reduced.state;
+    diagnosticCode = reduced.diagnosticCode || diagnosticCode;
+    lastError = null;
+
+    if (event.type === EVENTS.USER_TEST_NATIVE) {
+      testOrigin = reduced.testOrigin || TEST_ORIGINS.IDLE;
+      lastTestResult = null;
+      armTestTimer();
+    } else if (event.type === EVENTS.TEST_SUCCESS) {
+      clearTestTimer();
+      testOrigin = null;
+      lastTestResult = null;
+    } else if (event.type === EVENTS.TEST_TIMEOUT) {
+      clearTestTimer();
+      testOrigin = nextOrigin;
+      recordFailure("timeout");
+    } else if (event.type === EVENTS.TEST_FAILED) {
+      clearTestTimer();
+      testOrigin = nextOrigin;
+      recordFailure("failed", event.errorClass);
+    } else if (event.type === EVENTS.USER_DISABLE) {
+      clearTestTimer();
+      testOrigin = null;
+      lastTestResult = null;
+      diagnosticCode = null;
+    }
+
+    emitSnapshotChanged();
+    return { ok: true, state };
+  }
+
+  function enqueue(task) {
+    const run = dispatchQueue.then(task, task);
+    dispatchQueue = run.catch(() => {});
+    return run;
+  }
+
+  function dispatch(event) {
+    return enqueue(() => dispatchNow(event));
+  }
+
+  async function initNow() {
+    readPrefsNow();
+    const initial = computeInitial({ prefs, files: readFilesNow() });
+    state = initial.state;
+    testOrigin = initial.testOrigin || null;
+    diagnosticCode = initial.diagnosticCode || null;
+    lastError = null;
+    lastTestResult = null;
+    try {
+      await applyEffects(initial.sideEffects);
+    } catch (err) {
+      lastError = {
+        code: err && err.code ? String(err.code).slice(0, 64) : "NATIVE_START_FAILED",
+        eventType: EVENTS.INIT,
+      };
+      safeLog("warn", "native Telegram init failed", {
+        error: err && err.message ? err.message : String(err),
+      });
+    }
+    emitSnapshotChanged();
+    return state;
+  }
+
+  function init() {
+    return enqueue(initNow);
+  }
+
+  async function reconcileNow({ identityChanged = false } = {}) {
+    const wasTesting = state === STATES.TESTING_NATIVE;
+    const wasRuntimeActive = state === STATES.NATIVE_ACTIVE || wasTesting || native.isPolling() === true;
+    const priorOrigin = testOrigin;
+
+    readPrefsNow();
+    if (identityChanged && !wasTesting) {
+      lastTestResult = null;
+    }
+    if (identityChanged && prefs.transport === "native" && prefs.nativeVerifiedAt) {
+      await stopNativeBestEffort();
+      clearTestTimer();
+      await persistPatch({ nativeVerifiedAt: null });
+    }
+
+    const files = readFilesNow();
+    const next = computeInitial({ prefs, files });
+
+    if (wasTesting && !identityChanged && files.nativeConfigComplete === true) {
+      // A non-connection preference update must not settle or restart an
+      // in-flight test.
+      return getSnapshot();
+    }
+
+    const nextRuntimeActive = next.state === STATES.NATIVE_ACTIVE;
+    if (wasRuntimeActive && !nextRuntimeActive) {
+      await stopNativeBestEffort();
+      clearTestTimer();
+    }
+    if (nextRuntimeActive && native.isPolling() !== true) {
+      try {
+        await native.start();
+      } catch (err) {
+        lastError = {
+          code: err && err.code ? String(err.code).slice(0, 64) : "NATIVE_START_FAILED",
+          eventType: "CONFIG_CHANGED",
+        };
+      }
+    }
+
+    state = next.state;
+    diagnosticCode = next.diagnosticCode || null;
+    testOrigin = next.testOrigin
+      || (state === STATES.NATIVE_MIGRATION_REQUIRED ? priorOrigin : null);
+    if (wasTesting) {
+      recordFailure("failed", identityChanged ? "apply-failed" : "unknown");
+    }
+    emitSnapshotChanged();
+    return getSnapshot();
+  }
+
+  function reconcileConfiguration(options) {
+    return enqueue(() => reconcileNow(options));
+  }
+
+  async function disposeNow() {
+    clearTestTimer();
+    await stopNativeBestEffort();
+  }
+
+  function dispose() {
+    return enqueue(disposeNow);
+  }
+
+  return {
+    init,
+    dispatch,
+    reconcileConfiguration,
+    getSnapshot,
+    dispose,
+  };
 }
 
-module.exports = { createTelegramMigrationController };
+module.exports = {
+  ALLOWED_TEST_ERROR_CLASSES,
+  sanitizeErrorClass,
+  createTelegramMigrationController,
+};

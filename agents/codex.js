@@ -1,11 +1,12 @@
 // Codex CLI agent configuration
-// Official hooks are primary for lifecycle state; JSONL polling remains as
-// fallback and for events official hooks do not cover yet.
+// Official hooks are primary for lifecycle state and permissions; JSONL polling
+// remains as state/metadata fallback for events official hooks do not cover yet.
 
 module.exports = {
   id: "codex",
   name: "Codex CLI",
   processNames: { win: ["codex.exe"], mac: ["codex"], linux: ["codex"] },
+  startupRecoveryProcessNames: { win: ["codex.exe"], mac: ["codex"], linux: ["codex"] },
   eventSource: "hook+log-poll",
   eventMap: {
     SessionStart: "idle",
@@ -13,7 +14,11 @@ module.exports = {
     PreToolUse: "working",
     PermissionRequest: "notification",
     PostToolUse: "working",
+    PreCompact: "sweeping",
+    PostCompact: "sweeping",
+    Interrupt: "idle",
     Stop: "codex-turn-end",
+    SessionEnd: "sleeping",
   },
   // JSONL record type:subtype → pet state mapping. The remote monitor keeps
   // a zero-dep subset of this table; update both paths when adding shared
@@ -30,17 +35,16 @@ module.exports = {
     "response_item:function_call": "working",
     "response_item:custom_tool_call": "working",
     "response_item:web_search_call": "working",
-    "event_msg:task_complete": "codex-turn-end", // resolved by monitor: attention if tools were used, idle otherwise
+    "event_msg:task_complete": "codex-turn-end", // resolved by monitor: attention if tools/assistant output happened, idle otherwise
     "event_msg:context_compacted": "sweeping",
     "event_msg:turn_aborted": "idle",
   },
   capabilities: {
     httpHook: false,
     permissionApproval: true,
-    // Official PermissionRequest is a real approval path. JSONL fallback still
-    // keeps interactiveBubble=true for older/no-hook sessions.
+    // Official PermissionRequest is the real approval path.
     interactiveBubble: true,
-    sessionEnd: false, // no SessionEnd event; task_complete marks the turn done, process exit clears the session
+    sessionEnd: true, // official SessionEnd fires on thread teardown; task_complete still marks individual turns done
     subagent: false,
   },
   logConfig: {

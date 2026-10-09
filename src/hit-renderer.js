@@ -20,13 +20,11 @@ if (window.hitAPI && window.hitAPI.onThemeConfig) {
 }
 
 // --- State synced from main ---
-let currentSvg = null;
 let currentState = null;
 let miniMode = false;
 let dndEnabled = false;
 
 window.hitAPI.onStateSync((data) => {
-  if (data.currentSvg !== undefined) currentSvg = data.currentSvg;
   if (data.currentState !== undefined) currentState = data.currentState;
   if (data.miniMode !== undefined) {
     miniMode = data.miniMode;
@@ -89,6 +87,17 @@ area.addEventListener("pointerdown", (e) => {
 
 document.addEventListener("pointermove", (e) => {
   if (isDragging) {
+    // A swallowed pointerup (UAC secure desktop, RDP reconnect, fullscreen
+    // transition) leaves isDragging and the main-process drag lock stranded
+    // while hover moves keep flowing. The first move with no pressed button
+    // proves the physical gesture is over — finish through the normal stop
+    // path (drag-lock false, drag-end if moved). A real drag always carries
+    // buttons != 0, and a held-still mouse emits no moves at all, so a
+    // genuine long press is never cut short by this.
+    if (e.buttons === 0) {
+      stopDrag();
+      return;
+    }
     if (!didDrag) {
       const totalDx = e.clientX - mouseDownX;
       const totalDy = e.clientY - mouseDownY;
@@ -114,7 +123,11 @@ function stopDrag() {
   if (didDrag) {
     window.hitAPI.dragEnd();
   }
-  endDragReaction();
+  // A state-change cancel can arrive after pointer movement and clear the
+  // input window's local reaction flag. The render window may already have
+  // received startDragReaction, so an actual drag must still complete the
+  // end handshake on pointerup/cancel/lost capture/blur.
+  endDragReaction(didDrag);
 }
 
 document.addEventListener("pointerup", (e) => {
@@ -146,6 +159,14 @@ document.addEventListener("pointerup", (e) => {
 area.addEventListener("pointercancel", () => stopDrag());
 area.addEventListener("lostpointercapture", () => { if (isDragging) stopDrag(); });
 window.addEventListener("blur", stopDrag);
+
+// Main released the lock because a user-invoked recovery ran (bring to
+// primary display / send to display / hide show). If this renderer is alive
+// and still holding a phantom capture, drop it through the normal stop path
+// so gesture state, drag reaction and the input gate all unwind together.
+window.hitAPI.onForceDragRelease(() => {
+  if (isDragging) stopDrag();
+});
 
 // --- Click reaction logic (2-click = poke, 4-click = flail) ---
 const CLICK_WINDOW_MS = 400;
@@ -244,11 +265,69 @@ function startDragReaction(direction) {
   window.hitAPI.startDragReaction(direction);
 }
 
-function endDragReaction() {
-  if (!isDragReacting) return;
+function endDragReaction(force = false) {
+  if (!isDragReacting && !force) return;
   isDragReacting = false;
   dragReactionDirection = null;
   window.hitAPI.endDragReaction();
+}
+
+// --- OS file drop → open terminal at that directory (#459, Windows/Linux only) ---
+// macOS is OUT: the pet windows live at screen-saver level so they stay above
+// fullscreen apps, and macOS drag-destination search never delivers drag
+// events to windows at that level (real-machine bisect, 2026-06-11 — lowering
+// only the hit window doesn't help either, the overlapping screen-saver render
+// window still blocks the search; ignoresMouseEvents passes mouse events
+// through but NOT drag destinations). Don't re-attempt without changing the
+// window-level model; listeners are simply not registered on mac.
+//
+// Affordance gating lives HERE (not only in main): in mini mode dragover must
+// not preventDefault, so the OS shows "no drop" instead of a copy cursor that
+// would then do nothing. Main re-checks mini (and platform) as the second layer.
+function dragHasFiles(e) {
+  const types = e.dataTransfer && e.dataTransfer.types;
+  if (!types) return false;
+  for (const t of types) { if (t === "Files") return true; }
+  return false;
+}
+
+if (!isMac) {
+  area.addEventListener("dragover", (e) => {
+    if (miniMode || !dragHasFiles(e)) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "copy";
+  });
+
+  area.addEventListener("drop", (e) => {
+    if (!dragHasFiles(e)) return;
+    e.preventDefault();
+    if (miniMode) return;
+    const paths = [];
+    for (const file of e.dataTransfer.files || []) {
+      const p = window.hitAPI.getPathForFile(file);
+      if (typeof p === "string" && p) paths.push(p);
+    }
+    if (paths.length) window.hitAPI.dropPaths(paths);
+  });
+
+  // Main confirmed the drop opened a terminal → react. Routed back through the
+  // local playReaction so isReacting gating stays consistent. Best-effort with a
+  // fallback chain: double (Clawd) → clickLeft/clickRight poke (Calico) →
+  // nothing (Cloudling only ships a drag reaction; no new theme capability is
+  // invented for drops).
+  window.hitAPI.onDropAccepted(() => {
+    if (!canPlayReactionNow()) return;
+    const doubleReact = _getReaction("double");
+    if (doubleReact) {
+      const files = doubleReact.files || [doubleReact.file];
+      playReaction(files[Math.floor(Math.random() * files.length)], doubleReact.duration || 3500);
+      return;
+    }
+    const left = _getReaction("clickLeft");
+    const right = _getReaction("clickRight");
+    const poke = left && right ? (Math.random() < 0.5 ? left : right) : (left || right);
+    if (poke) playReaction(poke.file, poke.duration || 2500);
+  });
 }
 
 // --- Right-click context menu ---

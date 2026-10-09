@@ -5,6 +5,12 @@ const { EventEmitter } = require("node:events");
 const { describe, it } = require("node:test");
 
 const initServer = require("../src/server");
+const { makeSessionKey } = require("../src/session-key");
+
+const localSessionKey = (rawSessionId) => makeSessionKey({
+  profileId: "local",
+  rawSessionId,
+});
 
 function makeFakeHttp() {
   let capturedHandler = null;
@@ -22,6 +28,7 @@ function makeReq(body) {
   const req = new EventEmitter();
   req.method = "POST";
   req.url = "/permission";
+  req.headers = { host: "127.0.0.1:23333", "content-type": "application/json" };
   setImmediate(() => {
     req.emit("data", Buffer.from(JSON.stringify(body)));
     req.emit("end");
@@ -154,6 +161,28 @@ describe("Qwen Code /permission path", () => {
     }
   });
 
+  it("returns no-decision for headless Qwen sessions before auto-pilot can allow", async () => {
+    const sessionId = "qwen-code:headless";
+    const { handler, pendingPermissions, shown } = startServer({
+      sessions: new Map([[localSessionKey(sessionId), { agentId: "qwen-code", headless: true }]]),
+    });
+
+    const res = await callPermission(handler, {
+      agent_id: "qwen-code",
+      hook_source: "codex-official",
+      codex_session_role: "subagent",
+      codex_originator: "codex-tui",
+      session_id: sessionId,
+      tool_name: "Bash",
+      tool_input: { command: "npm test" },
+    });
+
+    assert.strictEqual(res.statusCode, 204);
+    assert.strictEqual(res.body, "");
+    assert.strictEqual(pendingPermissions.length, 0);
+    assert.strictEqual(shown.length, 0);
+  });
+
   it("enqueues a Qwen approval bubble without suggestions or provider-specific fields", async () => {
     const { handler, pendingPermissions, updates, shown } = startServer();
     const req = makeReq({
@@ -181,13 +210,15 @@ describe("Qwen Code /permission path", () => {
     const entry = pendingPermissions[0];
     assert.strictEqual(entry.isQwenCode, true);
     assert.strictEqual(entry.agentId, "qwen-code");
+    assert.strictEqual(entry.profileId, "local");
+    assert.strictEqual(entry.rawSessionId, "qwen-code:s1");
     assert.deepStrictEqual(entry.suggestions, []);
-    assert.strictEqual(Object.prototype.hasOwnProperty.call(entry, "opencodeAlwaysCandidates"), false);
+    assert.strictEqual(Object.prototype.hasOwnProperty.call(entry, "familyAlwaysCandidates"), false);
     assert.strictEqual(entry.toolInputFingerprint, "abc123");
     assert.strictEqual(entry.toolUseId, "tool-1");
     assert.strictEqual(entry.model, "qwen3-coder-plus");
     assert.deepStrictEqual(updates[0], [
-      "qwen-code:s1",
+      localSessionKey("qwen-code:s1"),
       "notification",
       "PermissionRequest",
       {
@@ -197,6 +228,12 @@ describe("Qwen Code /permission path", () => {
         pidChain: [789, 456, 123],
         cwd: "/repo",
         model: "qwen3-coder-plus",
+        profileId: "local",
+        rawSessionId: "qwen-code:s1",
+        sessionAutomationIdentity: {
+          eligible: false,
+          reason: "identity-verification-required",
+        },
       },
     ]);
 

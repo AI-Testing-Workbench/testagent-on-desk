@@ -55,7 +55,7 @@ describe("cmux panel focus (macOS)", () => {
   it("should call cmux focus-panel with matched panel UUID", (t, done) => {
     const panelId = "18AA1EB5-3055-445C-B780-60C88B21341B";
     const { tmpDir, cleanup: cleanupFile } = writeMockSessionFile([{
-      id: "ws-uuid-1",
+      workspaceId: "ws-uuid-1",
       panels: [{ id: panelId, ttyName: "ttys007", type: "terminal" }]
     }]);
     const origHome = process.env.HOME;
@@ -111,7 +111,7 @@ describe("cmux panel focus (macOS)", () => {
     const panelId = "18AA1EB5-3055-445C-B780-60C88B21341B";
     const workspaceId = "ws-uuid-1";
     const { tmpDir, cleanup: cleanupFile } = writeMockSessionFile([{
-      id: workspaceId,
+      workspaceId,
       panels: [{ id: panelId, ttyName: "ttys007", type: "terminal" }]
     }]);
     const origHome = process.env.HOME;
@@ -164,7 +164,7 @@ describe("cmux panel focus (macOS)", () => {
     const panel2Id = "panel-id-2";
     const matchedTty = "ttys003";
     const { tmpDir, cleanup: cleanupFile } = writeMockSessionFile([{
-      id: "ws-split",
+      workspaceId: "ws-split",
       panels: [
         { id: panel1Id, ttyName: "ttys001", type: "terminal" },
         { id: panel2Id, ttyName: matchedTty, type: "terminal" }
@@ -216,7 +216,7 @@ describe("cmux panel focus (macOS)", () => {
   it("should search later cmux session files when the newest file has no matching TTY", (t, done) => {
     const panelId = "panel-in-older-session";
     const { tmpDir, cmuxDir, cleanup: cleanupFile } = writeMockSessionFile([{
-      id: "newer-wrong-workspace",
+      workspaceId: "newer-wrong-workspace",
       panels: [{ id: "wrong-panel", ttyName: "ttys001", type: "terminal" }]
     }], "newer");
     const olderSessionPath = path.join(cmuxDir, "session-older.json");
@@ -225,7 +225,7 @@ describe("cmux panel focus (macOS)", () => {
         tabManager: {
           selectedWorkspaceIndex: 0,
           workspaces: [{
-            id: "older-matched-workspace",
+            workspaceId: "older-matched-workspace",
             panels: [{ id: panelId, ttyName: "ttys007", type: "terminal" }]
           }]
         }
@@ -312,14 +312,22 @@ describe("cmux panel focus (macOS)", () => {
       if (cb) cb(null, "", "");
     }, { platform: "linux" });
 
-    const { focusTerminalWindow } = initFocus({});
+    const focusInstance = initFocus({});
+    // Disable the tmux bridge so a real tmux binary on the host doesn't trigger
+    // `ps -o pid=,comm=` from scheduleTmuxPaneFocus — that probe is legitimate
+    // on Linux now, so we assert on the actual cmux probes (mdfind, AppleScript)
+    // instead of the old "no ps -o comm=" invariant.
+    focusInstance.__test.__setTmuxBin("");
+    const { focusTerminalWindow } = focusInstance;
     focusTerminalWindow(501, "/test/cwd", null, [501, 502]);
 
     setTimeout(() => {
       cleanup();
 
-      const psCommCalls = calls.filter(c => c.cmd === "ps" && c.args.join(" ").includes("comm="));
-      assert.strictEqual(psCommCalls.length, 0, "Should not call ps -o comm= on non-macOS");
+      const mdfindCalls = calls.filter(c => c.cmd === "mdfind");
+      assert.strictEqual(mdfindCalls.length, 0, "Should not run cmux mdfind on non-macOS");
+      const cmuxOsa = calls.filter(c => c.cmd === "osascript" && c.args.some(a => /cmux/i.test(a)));
+      assert.strictEqual(cmuxOsa.length, 0, "Should not run cmux AppleScript on non-macOS");
 
       done();
     }, 1000);

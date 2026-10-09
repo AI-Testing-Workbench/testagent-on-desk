@@ -1,13 +1,20 @@
 "use strict";
 
 // Integration tests for the /state endpoint's session_title handling
-// and the raised MAX_STATE_BODY_BYTES = 4096 cap.
+// and the MAX_STATE_BODY_BYTES cap.
 
 const { describe, it } = require("node:test");
 const assert = require("node:assert");
 const { EventEmitter } = require("node:events");
 
 const initServer = require("../src/server");
+const { MAX_STATE_BODY_BYTES } = require("../src/server-route-state");
+const { makeSessionKey } = require("../src/session-key");
+
+const localSessionKey = (rawSessionId) => makeSessionKey({
+  profileId: "local",
+  rawSessionId,
+});
 
 function makeFakeHttp() {
   let capturedHandler = null;
@@ -25,6 +32,14 @@ function makeReq(method, url, body) {
   const req = new EventEmitter();
   req.method = method;
   req.url = url;
+  req.headers = {
+    host: "127.0.0.1:23333",
+    "content-type": "application/json",
+  };
+  req.rawHeaders = [
+    "Host", "127.0.0.1:23333",
+    "Content-Type", "application/json",
+  ];
   // Emit data/end asynchronously — mirrors real http.IncomingMessage behavior
   setImmediate(() => {
     if (body != null) req.emit("data", Buffer.from(body));
@@ -188,9 +203,63 @@ describe("/state session_title handling", () => {
     assert.strictEqual(res.statusCode, 200);
     assert.strictEqual(updateSessionCalls[0][3].sessionTitle, null);
   });
+
+  it("passes sessionTitleFromPrompt for a marked non-empty title (#1125)", async () => {
+    const { handler, updateSessionCalls } = startServer();
+    const req = makeReq("POST", "/state", JSON.stringify({
+      state: "thinking",
+      session_id: "sid-1",
+      event: "UserPromptSubmit",
+      session_title: "Prompt first line",
+      session_title_from_prompt: true,
+    }));
+    const res = await callHandler(handler, req);
+    assert.strictEqual(res.statusCode, 200);
+    assert.strictEqual(updateSessionCalls[0][3].sessionTitle, "Prompt first line");
+    assert.strictEqual(updateSessionCalls[0][3].sessionTitleFromPrompt, true);
+  });
+
+  it("does not treat a string marker as prompt-derived (#1125)", async () => {
+    const { handler, updateSessionCalls } = startServer();
+    const req = makeReq("POST", "/state", JSON.stringify({
+      state: "thinking",
+      session_id: "sid-1",
+      event: "UserPromptSubmit",
+      session_title: "Prompt first line",
+      session_title_from_prompt: "true",
+    }));
+    await callHandler(handler, req);
+    assert.strictEqual(updateSessionCalls[0][3].sessionTitleFromPrompt, false);
+  });
+
+  it("does not treat a numeric marker as prompt-derived (#1125)", async () => {
+    const { handler, updateSessionCalls } = startServer();
+    const req = makeReq("POST", "/state", JSON.stringify({
+      state: "thinking",
+      session_id: "sid-1",
+      event: "UserPromptSubmit",
+      session_title: "Prompt first line",
+      session_title_from_prompt: 1,
+    }));
+    await callHandler(handler, req);
+    assert.strictEqual(updateSessionCalls[0][3].sessionTitleFromPrompt, false);
+  });
+
+  it("does not mark a request with no title as prompt-derived (#1125)", async () => {
+    const { handler, updateSessionCalls } = startServer();
+    const req = makeReq("POST", "/state", JSON.stringify({
+      state: "thinking",
+      session_id: "sid-1",
+      event: "UserPromptSubmit",
+      session_title_from_prompt: true,
+    }));
+    await callHandler(handler, req);
+    assert.strictEqual(updateSessionCalls[0][3].sessionTitle, null);
+    assert.strictEqual(updateSessionCalls[0][3].sessionTitleFromPrompt, false);
+  });
 });
 
-describe("/state MAX_STATE_BODY_BYTES (4KB cap)", () => {
+describe("/state MAX_STATE_BODY_BYTES cap", () => {
   it("accepts a normal payload with session_title (returns 200)", async () => {
     const { handler, updateSessionCalls } = startServer();
     const req = makeReq("POST", "/state", JSON.stringify({
@@ -205,13 +274,13 @@ describe("/state MAX_STATE_BODY_BYTES (4KB cap)", () => {
     assert.strictEqual(updateSessionCalls.length, 1);
   });
 
-  it("returns 413 when body exceeds MAX_STATE_BODY_BYTES (4KB)", async () => {
+  it("returns 413 when the body exceeds MAX_STATE_BODY_BYTES", async () => {
     const { handler, updateSessionCalls } = startServer();
-    // 5KB of padding in session_title — well over the 4KB cap
+    // session_title padded past the cap — guarantees an over-limit body
     const hugePayload = JSON.stringify({
       state: "working",
       session_id: "sid-1",
-      session_title: "x".repeat(5000),
+      session_title: "x".repeat(MAX_STATE_BODY_BYTES + 1000),
     });
     const req = makeReq("POST", "/state", hugePayload);
     const res = await callHandler(handler, req);
@@ -219,16 +288,16 @@ describe("/state MAX_STATE_BODY_BYTES (4KB cap)", () => {
     assert.strictEqual(updateSessionCalls.length, 0);
   });
 
-  it("accepts a payload just under 4KB", async () => {
+  it("accepts a payload just under MAX_STATE_BODY_BYTES", async () => {
     const { handler, updateSessionCalls } = startServer();
-    // Construct a payload that fits under 4096 bytes total
+    // Construct a payload that fits just under the cap.
     const payload = {
       state: "working",
       session_id: "sid-1",
-      session_title: "t".repeat(3500),
+      session_title: "t".repeat(MAX_STATE_BODY_BYTES - 600),
     };
     const body = JSON.stringify(payload);
-    assert.ok(body.length < 4096, `test payload is ${body.length} bytes, should be < 4096`);
+    assert.ok(body.length < MAX_STATE_BODY_BYTES, `test payload is ${body.length} bytes, should be < ${MAX_STATE_BODY_BYTES}`);
     const req = makeReq("POST", "/state", body);
     const res = await callHandler(handler, req);
     assert.strictEqual(res.statusCode, 200);
@@ -265,7 +334,7 @@ describe("/state Codex subagent role handling", () => {
 
     assert.strictEqual(res.statusCode, 200);
     const last = updateSessionCalls[updateSessionCalls.length - 1];
-    assert.strictEqual(last[0], "codex:sub");
+    assert.strictEqual(last[0], localSessionKey("codex:sub"));
     assert.strictEqual(last[1], "idle");
     assert.strictEqual(last[2], "Stop");
     assert.strictEqual(last[3].headless, true);

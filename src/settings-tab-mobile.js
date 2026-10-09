@@ -85,6 +85,12 @@
 
       html += '</div>';
 
+      // Action buttons
+      html += '<div class="mobile-conn-actions">';
+      html += `<button class="mobile-action-btn" id="mobile-regenerate-btn">${escapeHtml(t("mobileRegenerate") || "Regenerate Token")}</button>`;
+      html += `<button class="mobile-action-btn mobile-action-danger" id="mobile-reset-btn">${escapeHtml(t("mobileReset") || "Reset Mobile Access")}</button>`;
+      html += '</div>';
+
       container.innerHTML = html;
 
       // Copy button handlers
@@ -99,21 +105,45 @@
           }
         });
       });
+
+      // Regenerate button handler
+      var regenBtn = container.querySelector("#mobile-regenerate-btn");
+      if (regenBtn) {
+        regenBtn.addEventListener("click", function() {
+          var confirmMsg = t("mobileRegenerateConfirm") || "Regenerate token? All connected devices will be disconnected and will need to re-pair.";
+          if (!window.confirm(confirmMsg)) return;
+          if (!window.settingsAPI || typeof window.settingsAPI.regenerateMobileToken !== "function") return;
+          window.settingsAPI.regenerateMobileToken().then(function(result) {
+            if (result && result.status === "ok") {
+              renderConnectionInfo(container);
+            }
+          });
+        });
+      }
+
+      // Reset button handler
+      var resetBtn = container.querySelector("#mobile-reset-btn");
+      if (resetBtn) {
+        resetBtn.addEventListener("click", function() {
+          var confirmMsg = t("mobileResetConfirm") || "Reset mobile access? All connected devices will be disconnected and a new token will be generated.";
+          if (!window.confirm(confirmMsg)) return;
+          if (!window.settingsAPI || typeof window.settingsAPI.resetMobileAccess !== "function") return;
+          window.settingsAPI.resetMobileAccess().then(function(result) {
+            if (result && result.status === "ok") {
+              renderConnectionInfo(container);
+            }
+          });
+        });
+      }
     });
   }
 
-  function renderMobileTab(container, core) {
-    runtime = core.runtime;
-    helpers = core.helpers;
-    state = core.state;
-
+  // Body of the "Mobile Web" channel card inside the Remote Approval tab
+  // (the card frame — header, status badge, collapse — is built by
+  // settings-tab-telegram-approval.js next to the other channels).
+  function renderChannelBody(container) {
     const section = document.createElement("div");
     section.className = "settings-tab-section";
-
-    // Title & description
-    const title = document.createElement("h3");
-    title.textContent = t("mobileTitle") || "Mobile / PWA";
-    section.appendChild(title);
 
     const desc = document.createElement("p");
     desc.className = "settings-tab-desc";
@@ -150,8 +180,10 @@
   function init(core) {
     runtime = core.runtime;
     helpers = core.helpers;
-    core.tabs["mobile"] = { render: renderMobileTab };
+    state = core.state;
+    // No standalone tab registration: mobile renders as a channel card body
+    // inside the Remote Approval tab.
   }
 
-  root.ClawdSettingsTabMobile = { init };
+  root.ClawdSettingsTabMobile = { init, renderChannelBody };
 })(globalThis);

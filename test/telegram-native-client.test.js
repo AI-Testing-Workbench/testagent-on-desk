@@ -49,15 +49,19 @@ test("sendMessage: success returns result; token is NOT in transport args", asyn
   assert.deepEqual(server.calls[0].payload, { chat_id: 1, text: "hi" });
 });
 
-test("getMe / answerCallbackQuery / editMessageReplyMarkup roundtrip", async () => {
+test("getMe / answerCallbackQuery / editMessageReplyMarkup / editMessageText roundtrip", async () => {
   const { client, server } = makeClient();
   server.enqueueOk("getMe", { id: 9, username: "fake_bot" });
   server.enqueueOk("answerCallbackQuery", true);
   server.enqueueOk("editMessageReplyMarkup", { message_id: 11 });
+  server.enqueueOk("editMessageText", { message_id: 12, text: "done" });
 
   assert.equal((await client.getMe()).username, "fake_bot");
   assert.equal(await client.answerCallbackQuery({ callback_query_id: "x" }), true);
   assert.equal((await client.editMessageReplyMarkup({ chat_id: 1, message_id: 11 })).message_id, 11);
+  const edited = await client.editMessageText({ chat_id: 1, message_id: 12, text: "done" });
+  assert.equal(edited.message_id, 12);
+  assert.deepEqual(server.calls[3].payload, { chat_id: 1, message_id: 12, text: "done" });
 });
 
 test("getUpdates advances offset to lastUpdate.update_id + 1", async () => {
@@ -77,6 +81,101 @@ test("getUpdates advances offset to lastUpdate.update_id + 1", async () => {
   assert.equal(server.calls[1].payload.offset, 106);
   await client.getUpdates();
   assert.equal(client.offset, 201);
+});
+
+test("getUpdates preserves offset when the same bot restarts with a new signal", async () => {
+  const { client, server } = makeClient();
+  const firstPoll = new AbortController();
+  const restartedPoll = new AbortController();
+  server.enqueueOk("getUpdates", [{ update_id: 40 }]);
+  server.enqueueOk("getUpdates", []);
+
+  await client.getUpdates({ signal: firstPoll.signal });
+  firstPoll.abort();
+  await client.getUpdates({ signal: restartedPoll.signal });
+
+  assert.equal(client.offset, 41);
+  assert.equal(server.calls[1].payload.offset, 41);
+});
+
+test("getUpdates does not commit a late response after its poll signal aborts", async () => {
+  let releaseStalePoll;
+  const calls = [];
+  const client = new TelegramNativeClient({
+    tokenStore: fakeTokenStore(),
+    transport: async ({ method, payload, signal }) => {
+      calls.push({ method, payload, signal });
+      if (calls.length === 1) return { ok: true, result: [{ update_id: 9 }] };
+      if (calls.length === 2) {
+        return new Promise((resolve) => { releaseStalePoll = resolve; });
+      }
+      return { ok: true, result: [] };
+    },
+  });
+  const oldPoll = new AbortController();
+  await client.getUpdates({ signal: oldPoll.signal });
+  const staleRequest = client.getUpdates({ signal: oldPoll.signal });
+  await Promise.resolve();
+  await Promise.resolve();
+
+  oldPoll.abort();
+  releaseStalePoll({ ok: true, result: [{ update_id: 500 }] });
+  await staleRequest;
+  assert.equal(client.offset, 10);
+
+  const restartedPoll = new AbortController();
+  await client.getUpdates({ signal: restartedPoll.signal });
+  assert.equal(calls[2].payload.offset, 10);
+});
+
+test("resetOffset isolates a replacement bot from a late old-token response", async () => {
+  let activeToken = `${VALID_TOKEN}a`;
+  let releaseOldPoll;
+  const calls = [];
+  const tokenStore = {
+    async getToken() { return activeToken; },
+    async hasToken() { return !!activeToken; },
+  };
+  const transport = async ({ method, payload, signal }) => {
+    calls.push({ method, payload, signal, token: activeToken });
+    if (calls.length === 1) {
+      return { ok: true, result: [{ update_id: 99 }] };
+    }
+    if (calls.length === 2) {
+      // Deliberately ignore signal.abort() to reproduce a non-cooperative
+      // transport completing after stop -> token change -> restart.
+      return new Promise((resolve) => { releaseOldPoll = resolve; });
+    }
+    if (calls.length === 3) {
+      return { ok: true, result: [{ update_id: 4 }] };
+    }
+    return { ok: true, result: [] };
+  };
+  const client = new TelegramNativeClient({ tokenStore, transport });
+  const oldPoll = new AbortController();
+  await client.getUpdates({ signal: oldPoll.signal });
+  const staleRequest = client.getUpdates({ signal: oldPoll.signal });
+  await Promise.resolve();
+  await Promise.resolve();
+
+  oldPoll.abort();
+  activeToken = `${VALID_TOKEN}b`;
+  client.resetOffset();
+  const replacementPoll = new AbortController();
+  await client.getUpdates({ signal: replacementPoll.signal });
+
+  assert.equal(calls[0].payload.offset, 0);
+  assert.equal(calls[1].payload.offset, 100);
+  assert.equal(calls[2].payload.offset, 0, "replacement bot must not inherit the old bot offset");
+  assert.notEqual(calls[1].token, calls[2].token);
+  assert.equal(client.offset, 5);
+
+  releaseOldPoll({ ok: true, result: [{ update_id: 900 }] });
+  await staleRequest;
+  assert.equal(client.offset, 5, "late old-bot response must not raise the replacement offset");
+
+  await client.getUpdates({ signal: replacementPoll.signal });
+  assert.equal(calls[3].payload.offset, 5, "replacement poll lifecycle keeps its own progression");
 });
 
 test("Missing token throws TOKEN_MISSING (does not call transport)", async () => {
@@ -177,6 +276,33 @@ test("Error classes: undici fetch cause codes are network errors", () => {
   assert.equal(classifyError(err), ERROR_CLASSES.NETWORK);
 });
 
+test("Error classes: Chromium net::ERR_* connection failures are NETWORK (issue #359)", () => {
+  for (const message of [
+    "net::ERR_PROXY_CONNECTION_FAILED",
+    "net::ERR_TUNNEL_CONNECTION_FAILED",
+    "net::ERR_SOCKS_CONNECTION_FAILED",
+    "net::ERR_NAME_NOT_RESOLVED",
+    "net::ERR_CONNECTION_REFUSED",
+    "net::ERR_CONNECTION_RESET",
+    "net::ERR_TIMED_OUT",
+    "net::ERR_INTERNET_DISCONNECTED",
+  ]) {
+    assert.equal(classifyError(new Error(message)), ERROR_CLASSES.NETWORK, message);
+  }
+});
+
+test("Error classes: net::ERR_ABORTED is NETWORK, not TIMEOUT (must not exit poll loop)", () => {
+  // A genuine user abort arrives as name === "AbortError" and is handled earlier.
+  // An involuntary Chromium abort must be retried, so it must NOT map to TIMEOUT —
+  // the poll loop exits on TIMEOUT (telegram-native-runner.js loop/loopFirst).
+  assert.equal(classifyError(new Error("net::ERR_ABORTED")), ERROR_CLASSES.NETWORK);
+});
+
+test("Error classes: non-retryable net::ERR_* (cert / blocked) fall through to UNKNOWN", () => {
+  assert.equal(classifyError(new Error("net::ERR_CERT_AUTHORITY_INVALID")), ERROR_CLASSES.UNKNOWN);
+  assert.equal(classifyError(new Error("net::ERR_BLOCKED_BY_CLIENT")), ERROR_CLASSES.UNKNOWN);
+});
+
 test("Error classes: status=null but error_code=409 still classified as CONFLICT", () => {
   const err = new TelegramApiError({ status: null, code: 409, description: "Conflict" });
   assert.equal(classifyError(err), ERROR_CLASSES.CONFLICT);
@@ -207,6 +333,38 @@ test("Pre-aborted signal: transport refuses immediately, no call recorded", asyn
   const err = await client.getUpdates({ signal: ac.signal }).catch((e) => e);
   assert.equal(err.name, "AbortError");
   assert.equal(server.calls.length, 0);
+});
+
+test("abort during token lookup prevents the stale request from entering transport", async () => {
+  let releaseTokenLookup;
+  let tokenLookupStarted;
+  const lookupStarted = new Promise((resolve) => { tokenLookupStarted = resolve; });
+  const transportCalls = [];
+  const client = new TelegramNativeClient({
+    tokenStore: {
+      async getToken() { return VALID_TOKEN; },
+      async hasToken() {
+        tokenLookupStarted();
+        return new Promise((resolve) => { releaseTokenLookup = resolve; });
+      },
+    },
+    transport: async (request) => {
+      transportCalls.push(request);
+      return { ok: true, result: { message_id: 1 } };
+    },
+  });
+  const controller = new AbortController();
+  const pending = client.sendMessage(
+    { chat_id: 1, text: "stale" },
+    { signal: controller.signal },
+  );
+
+  await lookupStarted;
+  controller.abort();
+  releaseTokenLookup(true);
+
+  await assert.rejects(pending, (err) => err && err.name === "AbortError");
+  assert.deepEqual(transportCalls, []);
 });
 
 test("Wrong-user callback flow: client surfaces both updates; handler filters", async () => {

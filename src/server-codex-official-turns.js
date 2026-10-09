@@ -1,5 +1,7 @@
 "use strict";
 
+const { normalizeCodexTurnId } = require("./codex-turn-id");
+
 const CODEX_OFFICIAL_HOOK_SOURCE = "codex-official";
 const MAX_CODEX_OFFICIAL_TURNS = 200;
 const CODEX_SESSION_ROLE_SUBAGENT = "subagent";
@@ -20,9 +22,20 @@ function getCodexOfficialTurnKey(sessionId, turnId) {
   return `${sessionId || "default"}|${turnId}`;
 }
 
-function classifyCodexOfficialSession(data, classifier) {
+function hasCodexAssistantCompletionOutput(data) {
+  return typeof data.assistant_last_output === "string" && data.assistant_last_output.trim().length > 0;
+}
+
+function resolveCodexOfficialStopState(current, data) {
+  if (current && current.hadToolUse) return "attention";
+  return hasCodexAssistantCompletionOutput(data) ? "attention" : "idle";
+}
+
+function classifyCodexOfficialSession(data, classifier, sessionIdOverride = null) {
   if (!classifier || typeof classifier.registerSession !== "function") return "unknown";
-  const sessionId = typeof data.session_id === "string" && data.session_id ? data.session_id : "default";
+  const sessionId = typeof sessionIdOverride === "string" && sessionIdOverride
+    ? sessionIdOverride
+    : (typeof data.session_id === "string" && data.session_id ? data.session_id : "default");
   try {
     return classifier.registerSession(sessionId, {
       hookPayload: data,
@@ -33,22 +46,30 @@ function classifyCodexOfficialSession(data, classifier) {
   }
 }
 
-function resolveCodexOfficialHookState(data, requestedState, turns, classifier = null) {
+function resolveCodexOfficialHookState(
+  data,
+  requestedState,
+  turns,
+  classifier = null,
+  sessionIdOverride = null,
+) {
   if (!data || data.agent_id !== "codex" || data.hook_source !== CODEX_OFFICIAL_HOOK_SOURCE) {
     return { state: requestedState, drop: false };
   }
 
   const event = typeof data.event === "string" ? data.event : "";
-  const turnId = typeof data.turn_id === "string" && data.turn_id ? data.turn_id : null;
-  const sessionId = typeof data.session_id === "string" && data.session_id ? data.session_id : "default";
-  const sessionRole = classifyCodexOfficialSession(data, classifier);
+  const turnId = normalizeCodexTurnId(data.turn_id);
+  const sessionId = typeof sessionIdOverride === "string" && sessionIdOverride
+    ? sessionIdOverride
+    : (typeof data.session_id === "string" && data.session_id ? data.session_id : "default");
+  const sessionRole = classifyCodexOfficialSession(data, classifier, sessionId);
   const isSubagent = sessionRole === CODEX_SESSION_ROLE_SUBAGENT;
   const headless = isSubagent ? { headless: true } : {};
   const turnKey = getCodexOfficialTurnKey(sessionId, turnId);
 
   if (event === "Stop" && data.stop_hook_active === true) {
     if (turnKey && turns) turns.delete(turnKey);
-    return { state: requestedState, drop: true, ...headless };
+    return { state: requestedState, drop: true, ...(turnId ? { turnId } : {}), ...headless };
   }
 
   if (turnKey && turns) {
@@ -61,17 +82,28 @@ function resolveCodexOfficialHookState(data, requestedState, turns, classifier =
       current.hadToolUse = true;
       turns.set(turnKey, current);
       pruneCodexOfficialTurns(turns);
+    } else if (event === "Interrupt") {
+      turns.delete(turnKey);
     } else if (event === "Stop") {
       const current = turns.get(turnKey);
       if (current) turns.delete(turnKey);
-      if (isSubagent) return { state: "idle", drop: false, headless: true };
-      return { state: current && current.hadToolUse ? "attention" : "idle", drop: false };
+      if (isSubagent) return { state: "idle", drop: false, ...(turnId ? { turnId } : {}), headless: true };
+      return {
+        state: resolveCodexOfficialStopState(current, data),
+        drop: false,
+        ...(turnId ? { turnId } : {}),
+      };
     }
   } else if (event === "Stop") {
-    return { state: "idle", drop: false, ...headless };
+    return {
+      state: isSubagent ? "idle" : resolveCodexOfficialStopState(null, data),
+      drop: false,
+      ...(turnId ? { turnId } : {}),
+      ...headless,
+    };
   }
 
-  return { state: requestedState, drop: false, ...headless };
+  return { state: requestedState, drop: false, ...(turnId ? { turnId } : {}), ...headless };
 }
 
 module.exports = {
@@ -80,6 +112,7 @@ module.exports = {
   CODEX_SESSION_ROLE_SUBAGENT,
   pruneCodexOfficialTurns,
   getCodexOfficialTurnKey,
+  hasCodexAssistantCompletionOutput,
   classifyCodexOfficialSession,
   resolveCodexOfficialHookState,
 };

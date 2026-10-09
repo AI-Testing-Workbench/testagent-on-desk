@@ -41,22 +41,32 @@
         `<span class="row-label"></span>` +
         `<span class="row-desc"></span>` +
       `</div>` +
-      `<div class="row-control"><div class="switch" role="switch" tabindex="0"></div></div>`;
-    row.querySelector(".row-label").textContent = t(spec.labelKey);
-    row.querySelector(".row-desc").textContent = t(spec.descKey);
-    const sw = row.querySelector(".switch");
+      `<div class="row-control"></div>`;
+    const label = row.querySelector(".row-label");
+    const desc = row.querySelector(".row-desc");
+    label.textContent = t(spec.labelKey);
+    desc.textContent = t(spec.descKey);
 
     const switchId = animMapSwitchId(themeId, spec.stateKey);
+    label.id = `settings-anim-map-${themeId}-${spec.stateKey}-label`;
+    desc.id = `settings-anim-map-${themeId}-${spec.stateKey}-description`;
     const override = state.transientUiState.animMapSwitches.get(switchId);
     const visualOn = override ? override.visualOn : readAnimMapVisualOn(themeId, spec.stateKey);
-    helpers.setSwitchVisual(sw, visualOn, { pending: override ? override.pending : false });
+    const switchControl = helpers.buildSwitch({
+      checked: visualOn,
+      pending: override ? override.pending : false,
+      ariaLabelledBy: label.id,
+      ariaDescribedBy: desc.id,
+    });
+    row.querySelector(".row-control").appendChild(switchControl.element);
     state.mountedControls.animMapSwitches.set(switchId, {
-      element: sw,
+      control: switchControl,
+      element: switchControl.element,
       themeId,
       stateKey: spec.stateKey,
     });
 
-    helpers.attachAnimatedSwitch(sw, {
+    helpers.attachOptimisticSwitch(switchControl, {
       getCommittedVisual: () => readAnimMapVisualOn(themeId, spec.stateKey),
       getTransientState: () => state.transientUiState.animMapSwitches.get(switchId) || null,
       setTransientState: (value) => state.transientUiState.animMapSwitches.set(switchId, value),
@@ -74,11 +84,9 @@
     return row;
   }
 
-  function render(parent) {
-    const h1 = document.createElement("h1");
-    h1.textContent = t("animMapTitle");
-    parent.appendChild(h1);
-
+  // The parent tab supplies the stable title, subtitle, and subtab switcher.
+  // This module only renders the map-specific explanation and controls.
+  function renderMapSubtab(parent) {
     const subtitle = document.createElement("p");
     subtitle.className = "subtitle";
     subtitle.textContent = t("animMapSubtitle");
@@ -121,16 +129,26 @@
     parent.appendChild(resetWrap);
   }
 
-  function patchInPlace(changes) {
+  function patchMapInPlace(changes) {
     if (!changes || !Object.prototype.hasOwnProperty.call(changes, "themeOverrides")) return false;
-    if (Object.prototype.hasOwnProperty.call(changes, "theme")) return false;
+    if (Object.prototype.hasOwnProperty.call(changes, "theme")) {
+      // Theme switched: the mounted switch ids (themeId:stateKey) are now stale,
+      // so rebuild the subtab. The map reads themeOverrides straight from the
+      // snapshot, so a synchronous content re-render is enough — no need to
+      // refetch the (unrelated) animation-override asset data.
+      ops.requestRender({ content: true });
+      return true;
+    }
     if (state.mountedControls.animMapSwitches.size === 0) return false;
     for (const [, meta] of state.mountedControls.animMapSwitches) {
       if (!meta || !document.body.contains(meta.element)) return false;
     }
     for (const [id, meta] of state.mountedControls.animMapSwitches) {
       state.transientUiState.animMapSwitches.delete(id);
-      helpers.setSwitchVisual(meta.element, readAnimMapVisualOn(meta.themeId, meta.stateKey), { pending: false });
+      meta.control.setState({
+        checked: readAnimMapVisualOn(meta.themeId, meta.stateKey),
+        pending: false,
+      });
     }
     const reset = state.mountedControls.animMapReset;
     if (reset && document.body.contains(reset.element)) {
@@ -144,11 +162,9 @@
     helpers = core.helpers;
     ops = core.ops;
     readers = core.readers;
-    core.tabs.animMap = {
-      render,
-      patchInPlace,
-    };
   }
 
-  root.ClawdSettingsTabAnimMap = { init };
+  // The map is no longer a top-level tab — the Animation & Sound Overrides tab
+  // renders it as its "on / off" subtab via these two entry points.
+  root.ClawdSettingsTabAnimMap = { init, renderMapSubtab, patchMapInPlace };
 })(globalThis);

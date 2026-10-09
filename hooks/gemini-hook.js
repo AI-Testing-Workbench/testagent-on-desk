@@ -2,8 +2,8 @@
 // Clawd — Gemini CLI hook (stdin JSON with hook_event_name; stdout JSON for gating hooks)
 // Registered in ~/.gemini/settings.json by hooks/gemini-install.js
 
-const { postStateToRunningServer, readHostPrefix } = require("./server-config");
-const { createPidResolver, readStdinJson, getPlatformConfig } = require("./shared-process");
+const { postStateToRunningServer, readHostPrefix, applyWslSourceFields } = require("./server-config");
+const { createPidResolver, readStdinJson, getPlatformConfig, applyOrcaPaneKey } = require("./shared-process");
 
 // Gemini hook event → { state, event } for the Clawd state machine
 const HOOK_MAP = {
@@ -54,6 +54,28 @@ function normalizeSessionId(value) {
   return raw.startsWith("gemini:") ? raw : `gemini:${raw}`;
 }
 
+// #634: lifecycle for the shared resolver's cross-process pid cache, keyed on
+// Gemini's RAW hook names (BeforeAgent = the UserPromptSubmit equivalent).
+// cacheable compares against the exact normalizeSessionId fallback so an
+// id-less payload ("gemini:default", cf. #583) never keys a shared entry.
+const EVENT_TO_LIFECYCLE = {
+  SessionStart: "start",
+  BeforeAgent: "prompt",
+  SessionEnd: "end",
+};
+
+function pidCacheContext(hookName, payload) {
+  const sessionId = normalizeSessionId(payload && payload.session_id);
+  const cwd = (payload && payload.cwd) || "";
+  return {
+    namespace: "gemini-cli",
+    sessionId,
+    cacheCwd: cwd,
+    lifecycle: EVENT_TO_LIFECYCLE[hookName] || "event",
+    cacheable: sessionId !== "gemini:default" && !!cwd,
+  };
+}
+
 function hasToolResponseError(payload) {
   const response = payload && payload.tool_response;
   if (!response || typeof response !== "object") return false;
@@ -96,8 +118,15 @@ function buildStateBody(hookName, payload, options = {}) {
 
   if (options.remote) {
     body.host = options.host || readHostPrefix();
+    applyWslSourceFields(body, { remote: true });
+    applyOrcaPaneKey(body, options.env);
     return body;
   }
+  applyWslSourceFields(body);
+
+  // Before the pidMeta gate: the pane key comes from the environment, so it has
+  // to survive the events where shouldResolvePid skips the process snapshot.
+  applyOrcaPaneKey(body, options.env);
 
   const pidMeta = options.pidMeta;
   if (!pidMeta || typeof pidMeta !== "object") return body;
@@ -105,6 +134,8 @@ function buildStateBody(hookName, payload, options = {}) {
   if (pidMeta.detectedEditor) body.editor = pidMeta.detectedEditor;
   if (Number.isFinite(pidMeta.agentPid) && pidMeta.agentPid > 0) body.agent_pid = Math.floor(pidMeta.agentPid);
   if (Array.isArray(pidMeta.pidChain) && pidMeta.pidChain.length) body.pid_chain = pidMeta.pidChain;
+  if (pidMeta.tmuxSocket) body.tmux_socket = pidMeta.tmuxSocket;
+  if (pidMeta.tmuxClient) body.tmux_client = pidMeta.tmuxClient;
   return body;
 }
 
@@ -116,8 +147,9 @@ function sendHookEvent(payload, argvEvent, deps = {}) {
   const body = buildStateBody(hookName, payload, {
     remote,
     host: remote && deps.readHostPrefix ? deps.readHostPrefix() : undefined,
+    env,
     pidMeta: shouldResolvePid(hookName, env)
-      ? (deps.resolvePid ? deps.resolvePid() : undefined)
+      ? (deps.resolvePid ? deps.resolvePid(pidCacheContext(hookName, payload)) : undefined)
       : undefined,
   });
 
@@ -133,23 +165,55 @@ function sendHookEvent(payload, argvEvent, deps = {}) {
   });
 }
 
+// Safety timeout: guarantee valid JSON on stdout even if stdin never arrives.
+const SAFETY_TIMEOUT_MS = 800;
+let _wrote = false;
+let _exited = false;
+let safetyTimer = null;
+
+// Write the stdout response exactly once. Kept separate from process exit so the
+// hook can answer Gemini immediately yet still let the fire-and-forget POST to
+// Clawd leave the process before it tears down.
+function writeStdoutOnce(outLine) {
+  if (_wrote) return;
+  _wrote = true;
+  process.stdout.write(outLine + "\n");
+}
+
+function finish(outLine) {
+  writeStdoutOnce(outLine);
+  if (_exited) return;
+  _exited = true;
+  if (safetyTimer) clearTimeout(safetyTimer);
+  process.exit(0);
+}
+
 async function main(argvEvent = process.argv[2], deps = {}) {
   const payload = deps.payload !== undefined
     ? deps.payload
     : await (deps.readStdinJson || readStdinJson)();
-  const result = await sendHookEvent(payload, argvEvent, {
+  const hookName = resolveHookName(payload, argvEvent);
+  const outLine = stdoutForEvent(hookName);
+
+  // Answer Gemini immediately so it never sees empty stdout, but do NOT exit
+  // here — exiting would kill the POST below before it leaves the process.
+  writeStdoutOnce(outLine);
+
+  await sendHookEvent(payload, argvEvent, {
     env: deps.env || process.env,
     postState: deps.postState || postStateToRunningServer,
     readHostPrefix: deps.readHostPrefix || readHostPrefix,
     resolvePid: deps.resolvePid || resolve,
-  });
-  process.stdout.write(result.stdout + "\n");
+  }).catch(() => {});
+
+  finish(outLine);
 }
 
 if (require.main === module) {
-  main().then(() => {
-    process.exit(0);
-  });
+  // Arm the safety timer only on the CLI path so importing this module in tests
+  // never leaves a stray timer that pollutes stdout or kills the test runner.
+  safetyTimer = setTimeout(() => finish("{}"), SAFETY_TIMEOUT_MS);
+  main().catch(() => finish("{}"));
 }
 
 module.exports = {

@@ -22,6 +22,7 @@
     actionNotice: null,
     actionNoticeTimer: null,
     checkExpansionOverrides: new Map(),
+    disclosureControllers: [],
     checksLoading: false,
     connectionRunId: 0,
     repairRunId: 0,
@@ -39,6 +40,7 @@
     "disabled",
     "manual-managed",
     "manual-only",
+    "not-managed",
     "not-installed",
   ]);
   const AGENT_ATTENTION_NAME_LIMIT = 3;
@@ -128,10 +130,14 @@
 
   function checkLabel(core, check) {
     const map = {
+      "prefs-readability": "doctorCheckPrefsReadability",
       "local-server": "doctorCheckLocalServer",
       "agent-integrations": "doctorCheckAgentIntegrations",
       "permission-bubble-policy": "doctorCheckPermissionBubbles",
+      "feishu-approval": "doctorCheckFeishuApproval",
       "theme-health": "doctorCheckTheme",
+      "remote-ssh-ingress": "doctorCheckRemoteSshIngress",
+      "remote-ssh-isolation": "doctorCheckRemoteSshIsolation",
     };
     return t(core, map[check.id] || "doctorCheckUnknown");
   }
@@ -147,7 +153,7 @@
   function connectionStatusClass(test) {
     if (state.connectionTesting) return "warning";
     if (!test) return "unknown";
-    if (test.level === "warning" || test.status === "http-dropped" || test.status === "http-blocked" || test.status === "no-activity" || test.status === "error") {
+    if (test.level === "warning" || test.status === "http-dropped" || test.status === "http-blocked" || test.status === "hooks-need-review" || test.status === "no-activity" || test.status === "error") {
       return "warning";
     }
     return "pass";
@@ -162,10 +168,19 @@
       "http-verified": "doctorConnectionHttpVerified",
       "http-dropped": "doctorConnectionHttpDropped",
       "http-blocked": "doctorConnectionHttpBlocked",
+      "hooks-need-review": "doctorConnectionHooksNeedReview",
       "no-activity": "doctorConnectionNoActivity",
       error: "doctorConnectionError",
     };
     return t(core, map[test.status] || "doctorConnectionError");
+  }
+
+  function connectionDetailText(core, test) {
+    // Replace raw main-process details with locale-aware guidance for states
+    // that need a concrete user action.
+    if (test && test.status === "hooks-need-review") return t(core, "doctorConnectionHooksNeedReviewHint");
+    if (test && test.status === "no-activity") return t(core, "doctorConnectionNoActivityHint");
+    return (test && test.detail) || t(core, "doctorConnectionInstruction");
   }
 
   function pushIfValue(lines, label, value) {
@@ -210,8 +225,9 @@
     }
     pushIfValue(lines, "kiro", formatKiroScan(detail.kiroScan));
     pushIfValue(lines, "hook issue", detail.hookCommandIssue);
-    pushIfValue(lines, "opencode issue", detail.opencodeEntryIssue);
-    pushIfValue(lines, "opencode entry", detail.opencodeEntry);
+    // Agent-neutral labels: mimocode shares these fields (R9 F3).
+    pushIfValue(lines, "plugin issue", detail.opencodeEntryIssue);
+    pushIfValue(lines, "plugin entry", detail.opencodeEntry);
     return lines.filter(Boolean).join("; ");
   }
 
@@ -378,6 +394,12 @@
     if (attentionDetails.length) parts.push(formatAgentAttentionNames(core, attentionDetails));
     if (ok) parts.push(formatCount(core, "doctorAgentSummaryOk", ok));
     if (skipped) parts.push(formatCount(core, "doctorAgentSummarySkipped", skipped));
+    // No active integration at all (every agent disabled / manual-managed / not
+    // installed): lead with an info nudge so the green status doesn't read as
+    // "nothing to do" (#490).
+    if (!ok && !attentionDetails.length && skipped) {
+      parts.unshift(t(core, "doctorAgentSummaryNoneActive"));
+    }
     return parts.join(" · ");
   }
 
@@ -444,8 +466,8 @@
           `<span class="doctor-check-summary">${escape(core, summary)}</span>` +
           `<span class="doctor-check-status">${escape(core, checkStatusLabel(core, check))}</span>` +
         `</button>` +
-        `<div class="doctor-agent-body" aria-hidden="${expanded ? "false" : "true"}"${expanded ? "" : " inert"}>` +
-          `<div class="doctor-agent-body-inner">` +
+        `<div class="doctor-agent-body settings-disclosure-body" aria-hidden="${expanded ? "false" : "true"}"${expanded ? "" : " inert"}>` +
+          `<div class="doctor-agent-body-inner settings-disclosure-body-inner">` +
             renderAgentRows(core, check) +
           `</div>` +
         `</div>` +
@@ -504,7 +526,7 @@
     const cls = `${connectionStatusClass(test)}${state.connectionTesting ? " testing" : ""}`;
     const detail = state.connectionTesting
       ? t(core, "doctorConnectionInstruction")
-      : (test && test.detail) || t(core, "doctorConnectionInstruction");
+      : connectionDetailText(core, test);
     const progress = state.connectionTesting
       ? `<div class="doctor-connection-progress" aria-hidden="true"><span style="width: ${escape(core, String(connectionProgressPercent()))}%"></span></div>`
       : "";
@@ -587,6 +609,7 @@
   }
 
   function closeModal() {
+    disposeDoctorDisclosures();
     state.modalOpen = false;
     state.connectionRunId += 1;
     state.repairRunId += 1;
@@ -618,6 +641,13 @@
     if (state.modalOpen) mountModal(core, state.lastResult);
   }
 
+  function disposeDoctorDisclosures() {
+    for (const controller of state.disclosureControllers) {
+      if (controller && typeof controller.dispose === "function") controller.dispose();
+    }
+    state.disclosureControllers = [];
+  }
+
   function mountModal(core, result) {
     const opening = !state.modalOpen;
     if (opening) startModalEntering();
@@ -625,6 +655,7 @@
     state.modalOpen = true;
     const rootEl = document.getElementById("modalRoot");
     if (!rootEl) return;
+    disposeDoctorDisclosures();
     rootEl.innerHTML = (
       `<div class="modal-backdrop doctor-modal-backdrop">` +
         renderModalBody(core, result, { entering }) +
@@ -700,23 +731,20 @@
       });
     }
     for (const button of toggleCheckButtons) {
-      button.addEventListener("click", () => {
-        const id = button.getAttribute("data-check-id") || "";
-        const expanded = button.getAttribute("aria-expanded") === "true";
-        if (id) state.checkExpansionOverrides.set(id, !expanded);
-        const row = button.parentElement || button.parentNode;
-        const body = row && row.querySelector ? row.querySelector(".doctor-agent-body") : null;
-        button.setAttribute("aria-expanded", expanded ? "false" : "true");
-        if (row && row.classList) {
-          row.classList.toggle("expanded", !expanded);
-          row.classList.toggle("collapsed", expanded);
-        }
-        if (body) {
-          body.setAttribute("aria-hidden", expanded ? "true" : "false");
-          if (expanded) body.setAttribute("inert", "");
-          else body.removeAttribute("inert");
-        }
+      const id = button.getAttribute("data-check-id") || "";
+      const row = button.parentElement || button.parentNode;
+      const body = row && row.querySelector ? row.querySelector(".doctor-agent-body") : null;
+      if (!row || !body) continue;
+      const controller = core.helpers.attachSettingsDisclosure({
+        root: row,
+        trigger: button,
+        body,
+        expanded: button.getAttribute("aria-expanded") === "true",
+        onExpandedChange(nextExpanded) {
+          if (id) state.checkExpansionOverrides.set(id, nextExpanded);
+        },
       });
+      state.disclosureControllers.push(controller);
     }
   }
 

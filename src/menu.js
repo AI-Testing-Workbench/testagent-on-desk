@@ -3,10 +3,14 @@
 const { app, BrowserWindow, screen, Menu, Tray, nativeImage } = require("electron");
 const path = require("path");
 const { keepOutOfTaskbar } = require("./taskbar");
+const { loadTrayNormalIcon } = require("./tray-flash-icon");
+const { createMacDockVisibilityCoordinator } = require("./mac-dock-visibility");
+const { resolveRuntimeDockIconPolicy } = require("./mac-dock-icon-runtime");
 
-const isMac = process.platform === "darwin";
-const isWin = process.platform === "win32";
-const isLinux = process.platform === "linux";
+const platform = process.platform;
+const isMac = platform === "darwin";
+const isWin = platform === "win32";
+const isLinux = platform === "linux";
 
 // Login-item / autostart helpers and the openAtLogin write path live in
 // src/login-item.js + main.js's settings-actions effect. menu.js used to
@@ -25,9 +29,42 @@ const SIZES = {
 // settings panel can share them. menu.js binds the translator to ctx.lang.
 const { createTranslator } = require("./i18n");
 
+// Concatenate menu groups into one Electron template, inserting exactly one
+// separator between non-empty groups. Empty groups are dropped entirely so no
+// phantom/doubled separator is ever rendered (Electron leaves a visible gap for
+// a stray separator). Doing the grouping here — instead of hand-placing a
+// separator around almost every item — is what lets the menu read as a few
+// labelled clusters (state / work / display / app) rather than one slice per
+// row.
+function joinGroups(groups) {
+  const template = [];
+  for (const group of groups) {
+    if (!group || group.length === 0) continue;
+    if (template.length > 0) template.push({ type: "separator" });
+    template.push(...group);
+  }
+  return template;
+}
+
 module.exports = function initMenu(ctx) {
   // ── Translation helper (bound to ctx.lang via the shared i18n module) ──
   const t = createTranslator(() => ctx.lang);
+  const macDockVisibility = isMac ? createMacDockVisibilityCoordinator({
+    app,
+    dock: app.dock,
+    dockIconPath: path.join(__dirname, "../assets/dock-icon.png"),
+    shouldInstallDockIcon: () => resolveRuntimeDockIconPolicy({
+      platform,
+      isPackaged: app.isPackaged === true,
+      getSystemVersion: () => {
+        if (typeof ctx.getSystemVersion === "function") return ctx.getSystemVersion();
+        if (typeof process.getSystemVersion === "function") return process.getSystemVersion();
+        return "";
+      },
+    }),
+    getSettingsWindow: ctx.getSettingsWindow,
+    reapplyMacVisibility: ctx.reapplyMacVisibility,
+  }) : null;
 
   function isMiniSupported() {
     const caps = typeof ctx.getActiveThemeCapabilities === "function"
@@ -40,11 +77,127 @@ module.exports = function initMenu(ctx) {
   function buildMiniModeMenuItem() {
     const miniSupported = isMiniSupported();
     const inMiniMode = ctx.getMiniMode();
+    const miniDisabled = typeof ctx.getDisableMiniMode === "function" && ctx.getDisableMiniMode();
     return {
       label: inMiniMode ? t("exitMiniMode") : t("miniMode"),
       enabled: !ctx.getMiniTransitioning()
-        && (inMiniMode || (miniSupported && !(ctx.doNotDisturb && !inMiniMode))),
-      click: () => inMiniMode ? ctx.exitMiniMode() : ctx.enterMiniViaMenu(),
+        && (inMiniMode || (!miniDisabled && miniSupported && !(ctx.doNotDisturb && !inMiniMode))),
+      click: () => {
+        if (inMiniMode) return ctx.exitMiniMode();
+        if (miniDisabled) return undefined;
+        return ctx.enterMiniViaMenu();
+      },
+    };
+  }
+
+  function getPermissionAutomationMode() {
+    const mode = ctx.permissionAutomationMode;
+    return mode === "auto-tools" || mode === "unattended" ? mode : "off";
+  }
+
+  function permissionAutomationModeLabel(mode) {
+    if (mode === "auto-tools") return t("permissionAutomationAutoTools");
+    if (mode === "unattended") return t("permissionAutomationUnattended");
+    return t("permissionAutomationOff");
+  }
+
+  function isPermissionAutomationWarningDismissed(mode) {
+    return typeof ctx.isPermissionAutomationWarningDismissed === "function"
+      && ctx.isPermissionAutomationWarningDismissed(mode) === true;
+  }
+
+  function reportPermissionAutomationFailure(reason) {
+    const message = reason && reason.message
+      ? reason.message
+      : (typeof reason === "string" ? reason : "Unknown error");
+    console.warn("Clawd: permission automation mode change failed:", message);
+    try {
+      return Promise.resolve(ctx.showPermissionAutomationError({
+        lang: ctx.lang,
+        title: t("menuPermissionAutomation"),
+        detail: message,
+        dismissLabel: t("dismiss"),
+      })).catch((err) => {
+        console.warn("Clawd: permission automation error window failed:", err && err.message);
+      });
+    } catch (err) {
+      console.warn("Clawd: permission automation error window failed:", err && err.message);
+      return Promise.resolve();
+    }
+  }
+
+  function applyPermissionAutomationMode(mode, options) {
+    return Promise.resolve()
+      .then(() => ctx.setPermissionAutomationMode(mode, options))
+      .then((result) => {
+        if (result && result.status === "error") {
+          return reportPermissionAutomationFailure(result);
+        }
+        return result;
+      })
+      .catch((err) => reportPermissionAutomationFailure(err));
+  }
+
+  // Three explicit radio choices avoid hiding a materially different trust
+  // boundary behind one checkbox. Both automatic modes require confirmation;
+  // off is immediate.
+  function buildPermissionAutomationMenuItem() {
+    const current = getPermissionAutomationMode();
+    const options = ["off", "auto-tools", "unattended"];
+    const setMode = (mode) => {
+      if (mode === current) return;
+      if (mode === "off") {
+        applyPermissionAutomationMode("off", { confirmed: false })
+          .finally(() => rebuildAllMenus());
+        return;
+      }
+      const unattended = mode === "unattended";
+      if (isPermissionAutomationWarningDismissed(mode)) {
+        applyPermissionAutomationMode(mode, { confirmed: false })
+          .finally(() => rebuildAllMenus());
+        return;
+      }
+      Promise.resolve(
+        ctx.confirmPermissionAutomation({
+          mode,
+          lang: ctx.lang,
+          title: t(unattended
+            ? "permissionAutomationUnattendedConfirmTitle"
+            : "permissionAutomationAutoToolsConfirmTitle"),
+          detail: t(unattended
+            ? "permissionAutomationUnattendedConfirmDetail"
+            : "permissionAutomationAutoToolsConfirmDetail"),
+          checkboxLabel: t(unattended
+            ? "permissionAutomationUnattendedDontShowAgain"
+            : "permissionAutomationAutoToolsDontShowAgain"),
+          confirmLabel: t(unattended
+            ? "permissionAutomationEnableUnattended"
+            : "permissionAutomationEnableAutoTools"),
+          cancelLabel: t("permissionAutomationCancel"),
+        })
+      ).then((res) => {
+        if (res && res.confirmed === true) {
+          return applyPermissionAutomationMode(mode, {
+            confirmed: true,
+            suppressFutureConfirmation: res.suppressFutureConfirmation === true,
+          });
+        }
+        return undefined;
+      }).catch((err) => {
+        return reportPermissionAutomationFailure(err);
+      }).finally(() => {
+        rebuildAllMenus();
+      });
+    };
+
+    return {
+      label: `${t("menuPermissionAutomation")}: ${permissionAutomationModeLabel(current)}`,
+      submenu: options.map((mode) => ({
+        label: permissionAutomationModeLabel(mode),
+        type: "radio",
+        checked: current === mode,
+        click: () => setMode(mode),
+      })),
     };
   }
 
@@ -65,13 +218,13 @@ module.exports = function initMenu(ctx) {
   // ── System tray ──
   function createTray() {
     if (ctx.tray) return;
-    let icon;
-    if (isMac) {
-      icon = nativeImage.createFromPath(path.join(__dirname, "../assets/tray-iconTemplate.png"));
-      icon.setTemplateImage(true);
-    } else {
-      icon = nativeImage.createFromPath(path.join(__dirname, "../assets/tray-icon.png")).resize({ width: 32, height: 32 });
-    }
+    // Shared with the completion flash so both frames keep the same size (#722).
+    const icon = loadTrayNormalIcon({
+      nativeImage,
+      platform: process.platform,
+      templatePath: path.join(__dirname, "../assets/tray-iconTemplate.png"),
+      iconPath: path.join(__dirname, "../assets/icon.png"),
+    });
     ctx.tray = new Tray(icon);
     ctx.tray.setToolTip("Clawd Desktop Pet");
     buildTrayMenu();
@@ -85,29 +238,26 @@ module.exports = function initMenu(ctx) {
 
   function applyDockVisibility() {
     if (!isMac) return;
-    if (ctx.showDock) {
-      app.setActivationPolicy("regular");
-      if (app.dock) app.dock.show();
-    } else {
-      app.setActivationPolicy("accessory");
-      if (app.dock) app.dock.hide();
-    }
-    // dock.hide()/show() resets NSWindowCollectionBehavior — re-apply fullscreen visibility
-    ctx.reapplyMacVisibility();
+    return macDockVisibility.apply(ctx.showDock);
   }
 
   function buildTrayMenu() {
     if (!ctx.tray) return;
-    const items = [
+
+    // Same grouping discipline as the context menu (see joinGroups), adapted
+    // for the tray's larger item set: state / noise / work / system / app /
+    // quit. Other settings (language, theme, bubble follow, start-with-Claude,
+    // updates, etc.) live only in the Settings panel / About tab.
+    const stateGroup = [
       {
         label: ctx.doNotDisturb ? t("wake") : t("sleep"),
         click: () => ctx.doNotDisturb ? ctx.disableDoNotDisturb() : ctx.enableDoNotDisturb(),
       },
       buildMiniModeMenuItem(),
-      { type: "separator" },
-      // Quick-toggle noise controls. Other settings (language, theme, bubble
-      // follow, start-with-Claude, updates, etc.) were moved out of the tray
-      // and now live only in the Settings panel / About tab.
+    ];
+
+    // Quick noise toggles (bubbles + sound) kept together.
+    const noiseGroup = [
       {
         label: t("hideBubbles"),
         type: "checkbox",
@@ -120,22 +270,27 @@ module.exports = function initMenu(ctx) {
         checked: !ctx.soundMuted,
         click: (menuItem) => { ctx.soundMuted = !menuItem.checked; },
       },
-      { type: "separator" },
-      {
-        label: t("startOnLogin"),
-        type: "checkbox",
-        // Bound to prefs via ctx.openAtLogin. The setter routes to
-        // settings-controller → openAtLogin pre-commit gate, which calls the
-        // OS API. Subscriber in main.js rebuilds the menu on commit, so the
-        // checkbox updates without explicit buildTrayMenu/buildContextMenu().
-        checked: ctx.openAtLogin,
-        click: (menuItem) => { ctx.openAtLogin = menuItem.checked; },
-      },
     ];
-    // macOS: Dock and Menu Bar visibility toggles
+
+    // Dashboard + the danger auto-approve toggle (danger last, as in the
+    // context menu).
+    const workGroup = [
+      {
+        label: t("openDashboard"),
+        click: () => {
+          if (typeof ctx.openDashboard === "function") ctx.openDashboard();
+        },
+      },
+      buildPermissionAutomationMenuItem(),
+    ];
+
+    // OS-integration / placement group: bring-to-primary, mac dock/menu-bar,
+    // start-on-login.
+    const systemGroup = [
+      buildBringToPrimaryDisplayMenuItem(),
+    ];
     if (isMac) {
-      items.push(
-        { type: "separator" },
+      systemGroup.push(
         {
           label: t("showInMenuBar"),
           type: "checkbox",
@@ -152,36 +307,47 @@ module.exports = function initMenu(ctx) {
         },
       );
     }
-    items.push(
-      { type: "separator" },
+    systemGroup.push({
+      label: t("startOnLogin"),
+      type: "checkbox",
+      // Bound to prefs via ctx.openAtLogin. The setter routes to
+      // settings-controller → openAtLogin pre-commit gate, which calls the
+      // OS API. Subscriber in main.js rebuilds the menu on commit, so the
+      // checkbox updates without explicit buildTrayMenu/buildContextMenu().
+      checked: ctx.openAtLogin,
+      click: (menuItem) => { ctx.openAtLogin = menuItem.checked; },
+    });
+
+    const appGroup = [
       {
         label: t("settings"),
         click: () => ctx.openSettingsWindow(),
       },
-      {
-        label: t("openDashboard"),
-        click: () => {
-          if (typeof ctx.openDashboard === "function") ctx.openDashboard();
-        },
-      },
-      buildBringToPrimaryDisplayMenuItem(),
-    );
-    // #329: surface the update item in the tray menu. The label switches
-    // to "Update available · vX" / "Update Ready" when applicable. Click
-    // routes to checkForUpdates / quitAndInstall via getUpdateMenuItem.
+    ];
+    // #329: surface the update item alongside the app actions. The label
+    // switches to "Update available · vX" / "Update Ready" when applicable.
     if (typeof ctx.getUpdateMenuItem === "function") {
       const updateItem = ctx.getUpdateMenuItem();
-      if (updateItem) items.push({ type: "separator" }, updateItem);
+      if (updateItem) appGroup.push(updateItem);
     }
-    items.push(
-      { type: "separator" },
-      {
-        label: ctx.petHidden ? t("showPet") : t("hidePet"),
-        click: () => ctx.togglePetVisibility(),
-      },
-      { type: "separator" },
+    // Intent is captured at build time: the fullscreen auto-hide sync can
+    // restore or hide the pet from its background poll while this menu is
+    // still on screen (the tray is the easy case — right-clicking the tray
+    // icon takes the foreground off the fullscreen app, so the auto-restore
+    // fires under the open menu). A live toggle would invert the labeled
+    // action then; applying the captured intent makes the worst case an
+    // idempotent no-op that matches what the user read.
+    const petHiddenAtBuild = ctx.petHidden;
+    appGroup.push({
+      label: petHiddenAtBuild ? t("showPet") : t("hidePet"),
+      click: () => ctx.setPetVisibility(petHiddenAtBuild),
+    });
+
+    const quitGroup = [
       { label: t("quit"), click: () => requestAppQuit() },
-    );
+    ];
+
+    const items = joinGroups([stateGroup, noiseGroup, workGroup, systemGroup, appGroup, quitGroup]);
     ctx.tray.setContextMenu(Menu.buildFromTemplate(items));
   }
 
@@ -258,7 +424,14 @@ module.exports = function initMenu(ctx) {
       callback: () => {
         ctx.menuOpen = false;
         if (owner && !owner.isDestroyed()) owner.hide();
-        if (ctx.win && !ctx.win.isDestroyed()) {
+        // ctx.petHidden guard: the menu's own Hide item may have just hidden
+        // the pet, and the click handler can fire on either side of this close
+        // callback — an unconditional showInactive() would resurrect a window
+        // setPetHidden() just hid. Skipping is safe: showPetWindows() re-asserts
+        // taskbar/mac flags on the next show, and Windows topmost is held by
+        // the window's alwaysOnTop flag plus the topmost-runtime watchdog, not
+        // by this callback.
+        if (ctx.win && !ctx.win.isDestroyed() && !ctx.petHidden) {
           ctx.win.showInactive();
           keepOutOfTaskbar(ctx.win);
           if (isMac) {
@@ -296,6 +469,10 @@ module.exports = function initMenu(ctx) {
   function sendToDisplay(display) {
     if (!ctx.win || ctx.win.isDestroyed()) return;
     if (ctx.getMiniMode()) return;
+    // With a stranded drag lock, syncHitWin() defers and the input window
+    // would stay behind while the pet jumps displays. Release before moving;
+    // a live drag only loses its follow until its own pointerup completes.
+    if (typeof ctx.releaseStrandedDragLock === "function") ctx.releaseStrandedDragLock();
     const wa = display.workArea;
     const size = typeof ctx.getEffectiveCurrentPixelSize === "function"
       ? ctx.getEffectiveCurrentPixelSize(wa)
@@ -309,23 +486,30 @@ module.exports = function initMenu(ctx) {
   }
 
   function buildContextMenu() {
-    const template = [
-      {
-        ...buildMiniModeMenuItem(),
-      },
-      { type: "separator" },
+    // Grouped as state / work / display / app / quit and joined with a single
+    // separator between non-empty groups (see joinGroups). This replaced a flat
+    // list that wrapped almost every item in its own separator, and it moves the
+    // danger auto-approve toggle into the work group instead of leaving it as a
+    // prominent top-level entry.
+    const stateGroup = [
+      { ...buildMiniModeMenuItem() },
       {
         label: ctx.doNotDisturb ? t("wake") : t("sleep"),
         click: () => ctx.doNotDisturb ? ctx.disableDoNotDisturb() : ctx.enableDoNotDisturb(),
       },
-      { type: "separator" },
+    ];
+
+    const workGroup = [
       {
         label: t("openDashboard"),
         click: () => {
           if (typeof ctx.openDashboard === "function") ctx.openDashboard();
         },
       },
-      { type: "separator" },
+      {
+        label: t("openRecap"),
+        click: () => ctx.openSettingsWindow({ tab: "recap" }),
+      },
       {
         label: t("newSession"),
         submenu: [
@@ -343,56 +527,58 @@ module.exports = function initMenu(ctx) {
           },
         ],
       },
+      // Danger auto-approve sits at the tail of the work group: it governs how
+      // agent permission requests are handled, and keeping it here (rather than
+      // near the top) makes it harder to hit by accident.
+      buildPermissionAutomationMenuItem(),
     ];
-    // sendToDisplay is a multi-display-only tail entry. Push dynamically
-    // (rather than visible:false) — Electron leaves a phantom gap for
-    // hidden separators otherwise.
+
+    // Display group: just the multi-display "send to display" entry. The mac
+    // dock / menu-bar visibility toggles deliberately do NOT live here — they
+    // are set-once OS-integration prefs and live in the tray menu + Settings
+    // instead. On a single display this group is empty and joinGroups drops it.
+    const displayGroup = [];
     const displays = screen.getAllDisplays();
     if (displays.length > 1 && !ctx.getMiniMode()) {
-      template.push(
-        { type: "separator" },
-        {
-          label: t("sendToDisplay"),
-          submenu: buildDisplaySubmenu(displays),
-        },
-      );
+      displayGroup.push({
+        label: t("sendToDisplay"),
+        submenu: buildDisplaySubmenu(displays),
+      });
     }
-    // macOS: Dock and Menu Bar visibility toggles
-    if (isMac) {
-      template.push(
-        { type: "separator" },
-        {
-          label: t("showInMenuBar"),
-          type: "checkbox",
-          checked: ctx.showTray,
-          enabled: ctx.showTray ? ctx.showDock : true, // can't uncheck if Dock is already hidden
-          click: (menuItem) => { ctx.showTray = menuItem.checked; },
-        },
-        {
-          label: t("showInDock"),
-          type: "checkbox",
-          checked: ctx.showDock,
-          enabled: ctx.showDock ? ctx.showTray : true, // can't uncheck if Menu Bar is already hidden
-          click: (menuItem) => { ctx.showDock = menuItem.checked; },
-        },
-      );
-    }
-    template.push(
-      { type: "separator" },
+
+    const appGroup = [
       {
         label: t("settings"),
         click: () => ctx.openSettingsWindow(),
       },
-    );
-    // #329: surface the update item in the right-click context menu too.
+    ];
+    // #329: surface the update item alongside the other app actions when one is
+    // available.
     if (typeof ctx.getUpdateMenuItem === "function") {
       const updateItem = ctx.getUpdateMenuItem();
-      if (updateItem) template.push({ type: "separator" }, updateItem);
+      if (updateItem) appGroup.push(updateItem);
     }
-    template.push(
-      { type: "separator" },
+    // Intent is captured at build time: the fullscreen auto-hide sync can
+    // restore or hide the pet from its background poll while this menu is
+    // still on screen (the tray is the easy case — right-clicking the tray
+    // icon takes the foreground off the fullscreen app, so the auto-restore
+    // fires under the open menu). A live toggle would invert the labeled
+    // action then; applying the captured intent makes the worst case an
+    // idempotent no-op that matches what the user read.
+    const petHiddenAtBuild = ctx.petHidden;
+    appGroup.push({
+      label: petHiddenAtBuild ? t("showPet") : t("hidePet"),
+      click: () => ctx.setPetVisibility(petHiddenAtBuild),
+    });
+
+    // Quit stands alone as the final group so it is always set off by a
+    // separator (native-menu convention), which also keeps Hide/Show Pet
+    // directly above the Quit separator (see menu-hide-pet test, #460).
+    const quitGroup = [
       { label: t("quit"), click: () => requestAppQuit() },
-    );
+    ];
+
+    const template = joinGroups([stateGroup, workGroup, displayGroup, appGroup, quitGroup]);
     ctx.contextMenu = Menu.buildFromTemplate(template);
   }
 
@@ -403,12 +589,20 @@ module.exports = function initMenu(ctx) {
   }
 
   function resizeWindow(sizeKey, options = {}) {
+    // Some size commits have no preview protection (for example the displayed
+    // percentage reset), so stop any walk before it can restore its old size.
+    if (typeof ctx.cancelRoam === "function") ctx.cancelRoam();
     const mode = options.mode || (options.persist === false ? "preview" : "commit");
     const persist = mode !== "preview";
     // Setter routes through controller.applyUpdate("size", ...) — subscriber
     // rebuilds menus on commit. We still need to physically resize the
     // window and capture the new bounds at the end.
-    if (persist) ctx.currentSize = sizeKey;
+    if (persist) {
+      ctx.currentSize = sizeKey;
+      // A same-value update is a controller noop, but the preview may already
+      // have resized the window on a different display.
+      if (typeof ctx.resetKeepSizeFrozen === "function") ctx.resetKeepSizeFrozen();
+    }
     const size = (typeof ctx.getPixelSizeFor === "function")
       ? ctx.getPixelSizeFor(sizeKey)
       : (SIZES[sizeKey] || ctx.getCurrentPixelSize());
@@ -442,4 +636,3 @@ module.exports = function initMenu(ctx) {
     requestAppQuit,
   };
 };
-
