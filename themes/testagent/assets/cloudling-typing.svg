@@ -56,10 +56,8 @@
       <g filter="url(#drop)">
         <use href="#cloud-shape" fill="url(#body-grad)"/>
         <rect x="1" y="2" width="22" height="11" fill="url(#hi-grad)" clip-path="url(#cloud-clip)"/>
-          <circle id="testagent-border-circle" cx="12" cy="12" r="10.75" fill="none" stroke="url(#testagent-border)" stroke-width="1.5"/>
-  </g>
-
-</g>
+        <circle id="testagent-border-circle" cx="12" cy="12" r="10.75" fill="none" stroke="url(#testagent-border)" stroke-width="1.5"/>
+      </g>
     </g>
 
     <!-- 眼睛 layer (只 scale 不 rotate, 字符直立; d/fill/stroke 由 JS 实时填充) -->

@@ -65,6 +65,10 @@
   },
   "sleepingHitboxFiles": ["sleeping.svg"],
 
+  "sleepSequence": {
+    "mode": "direct"
+  },
+
   "reactions": {
     "drag": { "file": "react-drag.svg" },
     "clickLeft": { "file": "react-left.svg", "duration": 2500 },
